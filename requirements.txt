@@ -1,0 +1,11 @@
+colorlog
+debugpy
+httpx
+mcp
+openai
+openai-agents
+pydantic
+pydantic-settings
+pytest
+pytest-asyncio
+ruff
