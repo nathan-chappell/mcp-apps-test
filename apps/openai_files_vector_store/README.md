@@ -21,6 +21,8 @@ This is the first conceptual MCP app in the repo, built backend-first so we can 
 - `get_vector_store_status`
 - `search_vector_store`
 - `ask_vector_store`
+- `update_vector_store_file_attributes`
+- `delete_file`
 
 ## Local workflow
 
@@ -41,7 +43,7 @@ This is the first conceptual MCP app in the repo, built backend-first so we can 
 - The app ships as a single `dist/mcp-app.html` resource served from the Python MCP server.
 - `npm run dev` now uses a repo-local test host adapted from `modelcontextprotocol/ext-apps/examples/basic-host`, so you can exercise the real MCP transport and iframe bridge from the browser.
 - Local browser iteration is still supported with mock data via `npm run dev:mock`.
-- The first UI slice is intentionally retrieval-focused: list vector stores, inspect one store, run raw search, and run grounded Q&A.
+- The current UI focuses on retrieval and file management: inspect one store, scope search/ask to one attached file when needed, edit attachment metadata, and delete files globally.
 
 ## Testing
 

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TypeAlias
+from typing import Literal, TypeAlias
 
 from openai.types.file_object import FileObject
 from openai.types.responses import ResponseFileSearchToolCall
@@ -190,18 +190,6 @@ class FileListResult(BaseModel):
     purpose_filter: str | None = None
 
 
-class FilePreviewResult(BaseModel):
-    vector_store_id: str
-    file_id: str
-    filename: str
-    bytes: int
-    purpose: str
-    status: str
-    preview_text: str | None = None
-    preview_truncated: bool = False
-    preview_message: str | None = None
-
-
 class VectorStoreListResult(BaseModel):
     vector_stores: list[VectorStoreSummary]
     total_returned: int
@@ -231,6 +219,8 @@ class VectorStoreStatusResult(BaseModel):
 class SearchVectorStoreResult(BaseModel):
     vector_store_id: str
     query: str
+    file_id: str | None = None
+    filename: str | None = None
     hits: list[SearchHit]
     total_hits: int
 
@@ -238,6 +228,8 @@ class SearchVectorStoreResult(BaseModel):
 class AskVectorStoreResult(BaseModel):
     vector_store_id: str
     question: str
+    file_id: str | None = None
+    filename: str | None = None
     answer: str
     model: str
     search_calls: list[FileSearchCallSummary]
@@ -247,11 +239,17 @@ class SearchPanelState(BaseModel):
     query: str = ""
     max_num_results: int = 5
     rewrite_query: bool = False
+    scope: Literal["vector_store", "file"] = "vector_store"
+    file_id: str | None = None
+    filename: str | None = None
 
 
 class AskPanelState(BaseModel):
     question: str = ""
     max_num_results: int = 5
+    scope: Literal["vector_store", "file"] = "vector_store"
+    file_id: str | None = None
+    filename: str | None = None
 
 
 class OpenVectorStoreConsoleResult(BaseModel):
@@ -260,3 +258,8 @@ class OpenVectorStoreConsoleResult(BaseModel):
     selected_vector_store_status: VectorStoreStatusResult | None = None
     search_panel: SearchPanelState = Field(default_factory=SearchPanelState)
     ask_panel: AskPanelState = Field(default_factory=AskPanelState)
+
+
+class DeletedFileResult(BaseModel):
+    file_id: str
+    deleted: bool

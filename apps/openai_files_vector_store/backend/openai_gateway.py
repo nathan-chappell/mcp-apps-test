@@ -6,13 +6,16 @@ from pathlib import Path
 from time import perf_counter
 from typing import Any
 
-from openai import OpenAI
+from openai import NotFoundError, OpenAI
 from openai.types.file_purpose import FilePurpose
+from openai.types.shared_params.comparison_filter import ComparisonFilter
+from openai.types.shared_params.compound_filter import CompoundFilter
+from openai.types.vector_stores.vector_store_file import VectorStoreFile
 
 from .schemas import (
     AttachFilesResult,
+    DeletedFileResult,
     FileListResult,
-    FilePreviewResult,
     FileSummary,
     OpenAIAttributes,
     SearchHit,
@@ -27,6 +30,9 @@ from .schemas import (
     VectorStoreSummary,
 )
 from .settings import AppSettings
+
+RESERVED_FILE_ID_ATTRIBUTE = "openai_file_id"
+RESERVED_FILENAME_ATTRIBUTE = "filename"
 
 
 class OpenAIFilesVectorStoreGateway:
@@ -54,18 +60,20 @@ class OpenAIFilesVectorStoreGateway:
         attached_file: VectorStoreFileSummary | None = None
         normalized_attributes = self._normalize_attributes(attributes)
         if vector_store_id is not None:
-            create_kwargs: dict[str, Any] = {
+            attach_kwargs: dict[str, Any] = {
                 "file_id": uploaded_file.id,
                 "vector_store_id": vector_store_id,
                 "poll_interval_ms": self._settings.openai_poll_interval_ms,
             }
-            if normalized_attributes:
-                create_kwargs["attributes"] = normalized_attributes
-
-            vector_store_file = self._client.vector_stores.files.create_and_poll(
-                **create_kwargs
+            self._client.vector_stores.files.create_and_poll(
+                **attach_kwargs
             )
-            attached_file = VectorStoreFileSummary.from_openai(vector_store_file)
+            attached_file = self._update_vector_store_file_attributes(
+                vector_store_id=vector_store_id,
+                file_id=uploaded_file.id,
+                filename=uploaded_file.filename,
+                attributes=normalized_attributes,
+            )
 
         duration_ms = (perf_counter() - started_at) * 1000
         self._logger.info(
@@ -108,62 +116,6 @@ class OpenAIFilesVectorStoreGateway:
             files=files,
             total_returned=len(files),
             purpose_filter=purpose,
-        )
-
-    def preview_file(
-        self,
-        *,
-        file_id: str,
-        vector_store_id: str,
-        max_chars: int,
-    ) -> FilePreviewResult:
-        started_at = perf_counter()
-        file_object = self._client.files.retrieve(file_id)
-        parsed_contents_page = self._client.vector_stores.files.content(
-            file_id,
-            vector_store_id=vector_store_id,
-        )
-        parsed_text = "\n\n".join(
-            content_item.text
-            for content_item in parsed_contents_page
-            if content_item.type == "text" and content_item.text
-        )
-        preview_text = parsed_text[:max_chars] if parsed_text else None
-        preview_truncated = len(parsed_text) > max_chars
-
-        preview_message: str | None
-        if preview_text is None:
-            preview_message = (
-                "No parsed text preview is available yet for this attached file."
-            )
-        else:
-            preview_message = (
-                f"Showing the first {max_chars:,} characters of the parsed file content."
-                if preview_truncated
-                else None
-            )
-
-        duration_ms = (perf_counter() - started_at) * 1000
-        self._logger.info(
-            "openai_file_preview vector_store_id=%s file_id=%s filename=%s previewable=%s truncated=%s duration_ms=%.1f",
-            vector_store_id,
-            file_id,
-            file_object.filename,
-            preview_text is not None,
-            preview_truncated,
-            duration_ms,
-        )
-
-        return FilePreviewResult(
-            vector_store_id=vector_store_id,
-            file_id=file_object.id,
-            filename=file_object.filename,
-            bytes=file_object.bytes,
-            purpose=file_object.purpose,
-            status=file_object.status,
-            preview_text=preview_text,
-            preview_truncated=preview_truncated,
-            preview_message=preview_message,
         )
 
     def create_vector_store(
@@ -237,18 +189,23 @@ class OpenAIFilesVectorStoreGateway:
         attached_files: list[VectorStoreFileSummary]
 
         if total_files == 1 and existing_file_ids:
-            create_kwargs: dict[str, Any] = {
+            attach_kwargs: dict[str, Any] = {
                 "file_id": existing_file_ids[0],
                 "vector_store_id": vector_store_id,
                 "poll_interval_ms": self._settings.openai_poll_interval_ms,
             }
-            if normalized_attributes:
-                create_kwargs["attributes"] = normalized_attributes
-
-            vector_store_file = self._client.vector_stores.files.create_and_poll(
-                **create_kwargs
+            self._client.vector_stores.files.create_and_poll(
+                **attach_kwargs
             )
-            attached_files = [VectorStoreFileSummary.from_openai(vector_store_file)]
+            file_object = self._client.files.retrieve(existing_file_ids[0])
+            attached_files = [
+                self._update_vector_store_file_attributes(
+                    vector_store_id=vector_store_id,
+                    file_id=file_object.id,
+                    filename=file_object.filename,
+                    attributes=normalized_attributes,
+                )
+            ]
         elif total_files == 1 and resolved_local_paths:
             with Path(resolved_local_paths[0]).open("rb") as file_handle:
                 upload_kwargs: dict[str, Any] = {
@@ -256,13 +213,18 @@ class OpenAIFilesVectorStoreGateway:
                     "file": file_handle,
                     "poll_interval_ms": self._settings.openai_poll_interval_ms,
                 }
-                if normalized_attributes:
-                    upload_kwargs["attributes"] = normalized_attributes
-
                 vector_store_file = self._client.vector_stores.files.upload_and_poll(
                     **upload_kwargs
                 )
-            attached_files = [VectorStoreFileSummary.from_openai(vector_store_file)]
+            file_object = self._client.files.retrieve(vector_store_file.id)
+            attached_files = [
+                self._update_vector_store_file_attributes(
+                    vector_store_id=vector_store_id,
+                    file_id=file_object.id,
+                    filename=file_object.filename,
+                    attributes=normalized_attributes,
+                )
+            ]
         else:
             with ExitStack() as exit_stack:
                 file_handles = [
@@ -276,9 +238,6 @@ class OpenAIFilesVectorStoreGateway:
                     "max_concurrency": min(total_files, 5),
                     "poll_interval_ms": self._settings.openai_poll_interval_ms,
                 }
-                if normalized_attributes:
-                    batch_kwargs["attributes"] = normalized_attributes
-
                 batch = self._client.vector_stores.file_batches.upload_and_poll(
                     **batch_kwargs
                 )
@@ -290,8 +249,14 @@ class OpenAIFilesVectorStoreGateway:
                 limit=min(max(total_files, 20), 100),
             )
             attached_files = [
-                VectorStoreFileSummary.from_openai(vector_store_file)
+                self._update_vector_store_file_attributes(
+                    vector_store_id=vector_store_id,
+                    file_id=file_object.id,
+                    filename=file_object.filename,
+                    attributes=normalized_attributes,
+                )
                 for vector_store_file in batch_file_page.data
+                for file_object in [self._client.files.retrieve(vector_store_file.id)]
             ]
 
         duration_ms = (perf_counter() - started_at) * 1000
@@ -325,10 +290,10 @@ class OpenAIFilesVectorStoreGateway:
             vector_store_id,
             limit=file_limit,
         )
-        files = [
-            VectorStoreFileSummary.from_openai(vector_store_file)
-            for vector_store_file in vector_store_file_page.data
-        ]
+        files = self._existing_vector_store_files(
+            vector_store_id=vector_store_id,
+            vector_store_files=vector_store_file_page.data,
+        )
 
         batch_summary: VectorStoreBatchSummary | None = None
         batch_files: list[VectorStoreFileSummary] = []
@@ -343,10 +308,10 @@ class OpenAIFilesVectorStoreGateway:
                 vector_store_id=vector_store_id,
                 limit=file_limit,
             )
-            batch_files = [
-                VectorStoreFileSummary.from_openai(vector_store_file)
-                for vector_store_file in batch_file_page.data
-            ]
+            batch_files = self._existing_vector_store_files(
+                vector_store_id=vector_store_id,
+                vector_store_files=batch_file_page.data,
+            )
 
         duration_ms = (perf_counter() - started_at) * 1000
         self._logger.info(
@@ -371,20 +336,26 @@ class OpenAIFilesVectorStoreGateway:
         query: str,
         max_num_results: int,
         rewrite_query: bool,
+        file_id: str | None,
+        filename: str | None,
     ) -> SearchVectorStoreResult:
         started_at = perf_counter()
+        filters = self._build_search_filters(file_id=file_id, filename=filename)
         page = self._client.vector_stores.search(
             vector_store_id,
             query=query,
             max_num_results=max_num_results,
             rewrite_query=rewrite_query,
+            filters=filters,
         )
         hits = [SearchHit.from_openai(search_result) for search_result in page.data]
 
         duration_ms = (perf_counter() - started_at) * 1000
         self._logger.info(
-            "openai_vector_store_search vector_store_id=%s hits=%s duration_ms=%.1f",
+            "openai_vector_store_search vector_store_id=%s file_id=%s filename=%s hits=%s duration_ms=%.1f",
             vector_store_id,
+            file_id,
+            filename,
             len(hits),
             duration_ms,
         )
@@ -392,9 +363,49 @@ class OpenAIFilesVectorStoreGateway:
         return SearchVectorStoreResult(
             vector_store_id=vector_store_id,
             query=query,
+            file_id=file_id,
+            filename=filename,
             hits=hits,
             total_hits=len(hits),
         )
+
+    def update_vector_store_file_attributes(
+        self,
+        *,
+        vector_store_id: str,
+        file_id: str,
+        attributes: ToolAttributes | None,
+    ) -> VectorStoreFileSummary:
+        started_at = perf_counter()
+        file_object = self._client.files.retrieve(file_id)
+        normalized_attributes = self._normalize_attributes(attributes)
+        updated_file = self._update_vector_store_file_attributes(
+            vector_store_id=vector_store_id,
+            file_id=file_object.id,
+            filename=file_object.filename,
+            attributes=normalized_attributes,
+        )
+        duration_ms = (perf_counter() - started_at) * 1000
+        self._logger.info(
+            "openai_vector_store_file_attributes_update vector_store_id=%s file_id=%s attribute_count=%s duration_ms=%.1f",
+            vector_store_id,
+            file_id,
+            len(updated_file.attributes or {}),
+            duration_ms,
+        )
+        return updated_file
+
+    def delete_file(self, *, file_id: str) -> DeletedFileResult:
+        started_at = perf_counter()
+        deleted_file = self._client.files.delete(file_id)
+        duration_ms = (perf_counter() - started_at) * 1000
+        self._logger.info(
+            "openai_file_delete file_id=%s deleted=%s duration_ms=%.1f",
+            file_id,
+            deleted_file.deleted,
+            duration_ms,
+        )
+        return DeletedFileResult(file_id=file_id, deleted=deleted_file.deleted)
 
     def _resolve_local_path(self, local_path: str) -> Path:
         resolved_path = Path(local_path).expanduser().resolve()
@@ -418,3 +429,82 @@ class OpenAIFilesVectorStoreGateway:
             else:
                 normalized_attributes[key] = value
         return normalized_attributes
+
+    def _update_vector_store_file_attributes(
+        self,
+        *,
+        vector_store_id: str,
+        file_id: str,
+        filename: str,
+        attributes: OpenAIAttributes | None,
+    ) -> VectorStoreFileSummary:
+        merged_attributes = {
+            **(attributes or {}),
+            RESERVED_FILE_ID_ATTRIBUTE: file_id,
+            RESERVED_FILENAME_ATTRIBUTE: filename,
+        }
+        vector_store_file = self._client.vector_stores.files.update(
+            file_id,
+            vector_store_id=vector_store_id,
+            attributes=merged_attributes,
+        )
+        return VectorStoreFileSummary.from_openai(vector_store_file)
+
+    def _build_search_filters(
+        self,
+        *,
+        file_id: str | None,
+        filename: str | None,
+    ) -> ComparisonFilter | CompoundFilter | None:
+        filters: list[ComparisonFilter] = []
+        if file_id is not None:
+            filters.append(
+                {
+                    "key": RESERVED_FILE_ID_ATTRIBUTE,
+                    "type": "eq",
+                    "value": file_id,
+                }
+            )
+        if filename is not None:
+            filters.append(
+                {
+                    "key": RESERVED_FILENAME_ATTRIBUTE,
+                    "type": "eq",
+                    "value": filename,
+                }
+            )
+
+        if not filters:
+            return None
+        if len(filters) == 1:
+            return filters[0]
+        return {"type": "and", "filters": filters}
+
+    def _existing_vector_store_files(
+        self,
+        *,
+        vector_store_id: str,
+        vector_store_files: list[VectorStoreFile],
+    ) -> list[VectorStoreFileSummary]:
+        existing_files: list[VectorStoreFileSummary] = []
+        missing_file_ids: list[str] = []
+        for vector_store_file in vector_store_files:
+            try:
+                self._client.files.retrieve(vector_store_file.id)
+            except NotFoundError:
+                missing_file_ids.append(vector_store_file.id)
+                continue
+            refreshed_vector_store_file = self._client.vector_stores.files.retrieve(
+                vector_store_file.id,
+                vector_store_id=vector_store_id,
+            )
+            existing_files.append(
+                VectorStoreFileSummary.from_openai(refreshed_vector_store_file)
+            )
+
+        if missing_file_ids:
+            self._logger.warning(
+                "openai_vector_store_status_skipping_missing_files file_ids=%s",
+                missing_file_ids,
+            )
+        return existing_files

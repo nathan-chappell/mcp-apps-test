@@ -27,9 +27,11 @@ import { createMockBridge } from "./mockBridge";
 import { appCssVariablesResolver, appTheme } from "./theme";
 import type {
   AskVectorStoreResult,
-  FilePreviewResult,
+  AttributeValue,
   OpenVectorStoreConsoleResult,
+  ScopeMode,
   SearchVectorStoreResult,
+  VectorStoreFileSummary,
   VectorStoreListResult,
   VectorStoreStatusResult,
 } from "./types";
@@ -40,6 +42,9 @@ const IMPLEMENTATION = {
   version: "1.0.0",
 };
 const RESULT_SIZE_OPTIONS = ["3", "5", "8", "10"];
+const RESERVED_ATTRIBUTE_KEYS = new Set(["openai_file_id", "filename"]);
+
+type BusyState = "idle" | "refresh" | "status" | "search" | "ask";
 type StatusTone = "danger" | "info" | "neutral" | "success";
 
 function formatBytes(value: number): string {
@@ -86,6 +91,57 @@ function extractSafeAreaStyle(hostContext?: McpUiHostContext): CSSProperties {
 function isStandaloneMode(): boolean {
   const params = new URLSearchParams(window.location.search);
   return window.parent === window || params.get("mock") === "1";
+}
+
+function isAttributeValue(value: unknown): value is AttributeValue {
+  return typeof value === "string" || typeof value === "number" || typeof value === "boolean";
+}
+
+function isAttributeRecord(value: unknown): value is Record<string, AttributeValue> {
+  return typeof value === "object" && value !== null && !Array.isArray(value) && Object.values(value).every(isAttributeValue);
+}
+
+function extractFilename(file: VectorStoreFileSummary): string | null {
+  const candidate = file.attributes?.filename;
+  return typeof candidate === "string" ? candidate : null;
+}
+
+function getFileLabel(file: VectorStoreFileSummary): string {
+  return extractFilename(file) ?? file.id;
+}
+
+function getEditableAttributes(file: VectorStoreFileSummary): Record<string, AttributeValue> {
+  const editableEntries = Object.entries(file.attributes ?? {}).filter(([key]) => !RESERVED_ATTRIBUTE_KEYS.has(key));
+  return Object.fromEntries(editableEntries);
+}
+
+function formatMetadataDraft(file: VectorStoreFileSummary): string {
+  return JSON.stringify(getEditableAttributes(file), null, 2);
+}
+
+function parseMetadataDraft(input: string): Record<string, AttributeValue> {
+  const trimmedInput = input.trim();
+  if (!trimmedInput) {
+    return {};
+  }
+
+  const parsed = JSON.parse(trimmedInput) as unknown;
+  if (!isAttributeRecord(parsed)) {
+    throw new Error("Metadata must be a flat JSON object with string, number, or boolean values.");
+  }
+  return parsed;
+}
+
+function getScopeFile(files: VectorStoreFileSummary[], fileId: string | null): VectorStoreFileSummary | null {
+  if (fileId === null) {
+    return null;
+  }
+  return files.find((file) => file.id === fileId) ?? null;
+}
+
+function resolveScopedFilename(files: VectorStoreFileSummary[], fileId: string | null, previousFilename: string | null): string | null {
+  const scopedFile = getScopeFile(files, fileId);
+  return scopedFile ? extractFilename(scopedFile) ?? previousFilename : null;
 }
 
 function HostedConsoleApp() {
@@ -166,13 +222,21 @@ function ConsoleScaffold(props: { bridge: VectorStoreConsoleBridge; hostContext?
   const [searchQuery, setSearchQuery] = useState(props.bridge.initial_state.search_panel.query);
   const [searchRewriteQuery, setSearchRewriteQuery] = useState(props.bridge.initial_state.search_panel.rewrite_query);
   const [searchMaxResults, setSearchMaxResults] = useState(String(props.bridge.initial_state.search_panel.max_num_results));
+  const [searchScopeMode, setSearchScopeMode] = useState<ScopeMode>(props.bridge.initial_state.search_panel.scope);
+  const [searchScopeFileId, setSearchScopeFileId] = useState<string | null>(props.bridge.initial_state.search_panel.file_id);
+  const [searchScopeFilename, setSearchScopeFilename] = useState<string | null>(props.bridge.initial_state.search_panel.filename);
   const [question, setQuestion] = useState(props.bridge.initial_state.ask_panel.question);
   const [askMaxResults, setAskMaxResults] = useState(String(props.bridge.initial_state.ask_panel.max_num_results));
+  const [askScopeMode, setAskScopeMode] = useState<ScopeMode>(props.bridge.initial_state.ask_panel.scope);
+  const [askScopeFileId, setAskScopeFileId] = useState<string | null>(props.bridge.initial_state.ask_panel.file_id);
+  const [askScopeFilename, setAskScopeFilename] = useState<string | null>(props.bridge.initial_state.ask_panel.filename);
   const [searchResult, setSearchResult] = useState<SearchVectorStoreResult | null>(null);
   const [askResult, setAskResult] = useState<AskVectorStoreResult | null>(null);
-  const [filePreviewResult, setFilePreviewResult] = useState<FilePreviewResult | null>(null);
-  const [previewingFileId, setPreviewingFileId] = useState<string | null>(null);
-  const [busyState, setBusyState] = useState<"idle" | "refresh" | "status" | "search" | "ask">("idle");
+  const [editingFileId, setEditingFileId] = useState<string | null>(null);
+  const [metadataDraft, setMetadataDraft] = useState("{}");
+  const [savingMetadataFileId, setSavingMetadataFileId] = useState<string | null>(null);
+  const [deletingFileId, setDeletingFileId] = useState<string | null>(null);
+  const [busyState, setBusyState] = useState<BusyState>("idle");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   const deferredStatus = useDeferredValue(selectedVectorStoreStatus);
@@ -198,17 +262,42 @@ function ConsoleScaffold(props: { bridge: VectorStoreConsoleBridge; hostContext?
       setSearchQuery(props.bridge.initial_state.search_panel.query);
       setSearchRewriteQuery(props.bridge.initial_state.search_panel.rewrite_query);
       setSearchMaxResults(String(props.bridge.initial_state.search_panel.max_num_results));
+      setSearchScopeMode(props.bridge.initial_state.search_panel.scope);
+      setSearchScopeFileId(props.bridge.initial_state.search_panel.file_id);
+      setSearchScopeFilename(props.bridge.initial_state.search_panel.filename);
       setQuestion(props.bridge.initial_state.ask_panel.question);
       setAskMaxResults(String(props.bridge.initial_state.ask_panel.max_num_results));
+      setAskScopeMode(props.bridge.initial_state.ask_panel.scope);
+      setAskScopeFileId(props.bridge.initial_state.ask_panel.file_id);
+      setAskScopeFilename(props.bridge.initial_state.ask_panel.filename);
       setSearchResult(null);
       setAskResult(null);
-      setFilePreviewResult(null);
-      setPreviewingFileId(null);
+      setEditingFileId(null);
+      setMetadataDraft("{}");
+      setSavingMetadataFileId(null);
+      setDeletingFileId(null);
       setErrorMessage(null);
     });
   }, [props.bridge]);
 
   const selectedSummary = vectorStoreList.vector_stores.find((store) => store.id === selectedVectorStoreId) ?? null;
+  const selectedFiles = deferredStatus?.files ?? [];
+  const editingFile = getScopeFile(selectedFiles, editingFileId);
+
+  const searchScopeOptions = [
+    { value: "vector_store", label: "Whole vector store" },
+    ...selectedFiles.map((file) => ({
+      value: file.id,
+      label: getFileLabel(file),
+    })),
+  ];
+  const askScopeOptions = [
+    { value: "vector_store", label: "Whole vector store" },
+    ...selectedFiles.map((file) => ({
+      value: file.id,
+      label: getFileLabel(file),
+    })),
+  ];
 
   async function loadStatus(nextVectorStoreId: string | null): Promise<void> {
     if (nextVectorStoreId === null) {
@@ -217,7 +306,7 @@ function ConsoleScaffold(props: { bridge: VectorStoreConsoleBridge; hostContext?
         setSelectedVectorStoreStatus(null);
         setSearchResult(null);
         setAskResult(null);
-        setFilePreviewResult(null);
+        setEditingFileId(null);
       });
       return;
     }
@@ -234,35 +323,18 @@ function ConsoleScaffold(props: { bridge: VectorStoreConsoleBridge; hostContext?
         setSelectedVectorStoreStatus(status);
         setSearchResult(null);
         setAskResult(null);
-        setFilePreviewResult(null);
+        setEditingFileId((current) => (getScopeFile(status.files, current) ? current : null));
+        setSearchScopeFileId((current) => (getScopeFile(status.files, current) ? current : null));
+        setSearchScopeFilename((current) => resolveScopedFilename(status.files, searchScopeFileId, current));
+        setSearchScopeMode((current) => (getScopeFile(status.files, searchScopeFileId) ? current : "vector_store"));
+        setAskScopeFileId((current) => (getScopeFile(status.files, current) ? current : null));
+        setAskScopeFilename((current) => resolveScopedFilename(status.files, askScopeFileId, current));
+        setAskScopeMode((current) => (getScopeFile(status.files, askScopeFileId) ? current : "vector_store"));
       });
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : "Failed to load vector store status.");
     } finally {
       setBusyState("idle");
-    }
-  }
-
-  async function previewFile(fileId: string): Promise<void> {
-    if (!selectedVectorStoreId) {
-      setErrorMessage("Choose a vector store before previewing an attached file.");
-      return;
-    }
-
-    setPreviewingFileId(fileId);
-    setErrorMessage(null);
-    try {
-      const previewResult = await props.bridge.preview_file({
-        vector_store_id: selectedVectorStoreId,
-        file_id: fileId,
-      });
-      startTransition(() => {
-        setFilePreviewResult(previewResult);
-      });
-    } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : "Failed to preview the selected file.");
-    } finally {
-      setPreviewingFileId(null);
     }
   }
 
@@ -285,9 +357,28 @@ function ConsoleScaffold(props: { bridge: VectorStoreConsoleBridge; hostContext?
     }
   }
 
+  function useFileForSearch(file: VectorStoreFileSummary): void {
+    setSearchScopeMode("file");
+    setSearchScopeFileId(file.id);
+    setSearchScopeFilename(extractFilename(file));
+    setErrorMessage(null);
+  }
+
+  function useFileForAsk(file: VectorStoreFileSummary): void {
+    setAskScopeMode("file");
+    setAskScopeFileId(file.id);
+    setAskScopeFilename(extractFilename(file));
+    setErrorMessage(null);
+  }
+
   async function runSearch(): Promise<void> {
     if (!selectedVectorStoreId || !searchQuery.trim()) {
       setErrorMessage("Choose a vector store and enter a search query.");
+      return;
+    }
+
+    if (searchScopeMode === "file" && searchScopeFileId === null) {
+      setErrorMessage("Choose an attached file before running a file-scoped search.");
       return;
     }
 
@@ -299,6 +390,8 @@ function ConsoleScaffold(props: { bridge: VectorStoreConsoleBridge; hostContext?
         query: searchQuery,
         max_num_results: Number(searchMaxResults),
         rewrite_query: searchRewriteQuery,
+        file_id: searchScopeMode === "file" ? searchScopeFileId ?? undefined : undefined,
+        filename: searchScopeMode === "file" ? searchScopeFilename ?? undefined : undefined,
       });
       startTransition(() => {
         setSearchResult(result);
@@ -316,6 +409,11 @@ function ConsoleScaffold(props: { bridge: VectorStoreConsoleBridge; hostContext?
       return;
     }
 
+    if (askScopeMode === "file" && askScopeFileId === null) {
+      setErrorMessage("Choose an attached file before running a file-scoped grounded question.");
+      return;
+    }
+
     setBusyState("ask");
     setErrorMessage(null);
     try {
@@ -323,6 +421,8 @@ function ConsoleScaffold(props: { bridge: VectorStoreConsoleBridge; hostContext?
         vector_store_id: selectedVectorStoreId,
         question,
         max_num_results: Number(askMaxResults),
+        file_id: askScopeMode === "file" ? askScopeFileId ?? undefined : undefined,
+        filename: askScopeMode === "file" ? askScopeFilename ?? undefined : undefined,
       });
       startTransition(() => {
         setAskResult(result);
@@ -331,6 +431,73 @@ function ConsoleScaffold(props: { bridge: VectorStoreConsoleBridge; hostContext?
       setErrorMessage(error instanceof Error ? error.message : "Failed to run grounded Q&A.");
     } finally {
       setBusyState("idle");
+    }
+  }
+
+  function beginMetadataEdit(file: VectorStoreFileSummary): void {
+    setEditingFileId(file.id);
+    setMetadataDraft(formatMetadataDraft(file));
+    setErrorMessage(null);
+  }
+
+  async function saveMetadata(): Promise<void> {
+    if (!selectedVectorStoreId || editingFileId === null) {
+      setErrorMessage("Choose an attached file before updating metadata.");
+      return;
+    }
+
+    let attributes: Record<string, AttributeValue>;
+    try {
+      attributes = parseMetadataDraft(metadataDraft);
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "Invalid metadata JSON.");
+      return;
+    }
+
+    setSavingMetadataFileId(editingFileId);
+    setErrorMessage(null);
+    try {
+      await props.bridge.update_vector_store_file_attributes({
+        vector_store_id: selectedVectorStoreId,
+        file_id: editingFileId,
+        attributes,
+      });
+      setEditingFileId(null);
+      await loadStatus(selectedVectorStoreId);
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "Failed to update file metadata.");
+    } finally {
+      setSavingMetadataFileId(null);
+    }
+  }
+
+  async function deleteFile(file: VectorStoreFileSummary): Promise<void> {
+    if (!window.confirm(`Delete ${getFileLabel(file)} globally from OpenAI Files?`)) {
+      return;
+    }
+
+    setDeletingFileId(file.id);
+    setErrorMessage(null);
+    try {
+      await props.bridge.delete_file({ file_id: file.id });
+      if (editingFileId === file.id) {
+        setEditingFileId(null);
+      }
+      if (searchScopeFileId === file.id) {
+        setSearchScopeMode("vector_store");
+        setSearchScopeFileId(null);
+        setSearchScopeFilename(null);
+      }
+      if (askScopeFileId === file.id) {
+        setAskScopeMode("vector_store");
+        setAskScopeFileId(null);
+        setAskScopeFilename(null);
+      }
+      await refreshVectorStores();
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "Failed to delete the file.");
+    } finally {
+      setDeletingFileId(null);
     }
   }
 
@@ -501,88 +668,149 @@ function ConsoleScaffold(props: { bridge: VectorStoreConsoleBridge; hostContext?
                           </Card>
                         </div>
 
-                        <Table.ScrollContainer minWidth={720} type="native">
-                          <Table className="vector-store-table" striped withTableBorder>
-                            <Table.Thead>
-                              <Table.Tr>
-                                <Table.Th>Attached file</Table.Th>
-                                <Table.Th>Status</Table.Th>
-                                <Table.Th>Bytes</Table.Th>
-                                <Table.Th>Created</Table.Th>
-                                <Table.Th>Preview</Table.Th>
-                              </Table.Tr>
-                            </Table.Thead>
-                            <Table.Tbody>
-                              {deferredStatus.files.map((file) => (
-                                <Table.Tr key={file.id}>
-                                  <Table.Td>
-                                    <Code>{file.id}</Code>
-                                  </Table.Td>
-                                  <Table.Td>
-                                    <Badge className="vector-store-badge vector-store-badge--soft" data-tone={statusTone(file.status)}>
-                                      {file.status}
-                                    </Badge>
-                                  </Table.Td>
-                                  <Table.Td>{formatBytes(file.usage_bytes)}</Table.Td>
-                                  <Table.Td>{formatTimestamp(file.created_at)}</Table.Td>
-                                  <Table.Td>
-                                    <Button
-                                      className="vector-store-button vector-store-button--secondary"
-                                      loading={previewingFileId === file.id}
-                                      onClick={() => {
-                                        void previewFile(file.id);
-                                      }}
-                                      size="xs"
-                                      variant="default"
-                                    >
-                                      {filePreviewResult?.file_id === file.id ? "Previewed" : "Preview"}
-                                    </Button>
-                                  </Table.Td>
+                        {deferredStatus.files.length > 0 ? (
+                          <Table.ScrollContainer minWidth={960} type="native">
+                            <Table className="vector-store-table" striped withTableBorder>
+                              <Table.Thead>
+                                <Table.Tr>
+                                  <Table.Th>Attached file</Table.Th>
+                                  <Table.Th>Status</Table.Th>
+                                  <Table.Th>Bytes</Table.Th>
+                                  <Table.Th>Created</Table.Th>
+                                  <Table.Th>Metadata</Table.Th>
+                                  <Table.Th>Actions</Table.Th>
                                 </Table.Tr>
-                              ))}
-                            </Table.Tbody>
-                          </Table>
-                        </Table.ScrollContainer>
+                              </Table.Thead>
+                              <Table.Tbody>
+                                {deferredStatus.files.map((file) => (
+                                  <Table.Tr key={file.id}>
+                                    <Table.Td>
+                                      <Stack gap={4}>
+                                        <Text fw={700}>{getFileLabel(file)}</Text>
+                                        <Code>{file.id}</Code>
+                                      </Stack>
+                                    </Table.Td>
+                                    <Table.Td>
+                                      <Badge className="vector-store-badge vector-store-badge--soft" data-tone={statusTone(file.status)}>
+                                        {file.status}
+                                      </Badge>
+                                    </Table.Td>
+                                    <Table.Td>{formatBytes(file.usage_bytes)}</Table.Td>
+                                    <Table.Td>{formatTimestamp(file.created_at)}</Table.Td>
+                                    <Table.Td>
+                                      {file.attributes && Object.keys(file.attributes).length > 0 ? (
+                                        <div className="vector-store-attribute-list">
+                                          {Object.entries(file.attributes).map(([key, value]) => (
+                                            <Badge
+                                              key={`${file.id}-${key}`}
+                                              className="vector-store-badge vector-store-badge--soft"
+                                              data-tone={RESERVED_ATTRIBUTE_KEYS.has(key) ? "info" : "neutral"}
+                                            >
+                                              {key}: {String(value)}
+                                            </Badge>
+                                          ))}
+                                        </div>
+                                      ) : (
+                                        <Text c="dimmed" size="sm">
+                                          No metadata
+                                        </Text>
+                                      )}
+                                    </Table.Td>
+                                    <Table.Td>
+                                      <div className="vector-store-action-button-group">
+                                        <Button
+                                          className="vector-store-button vector-store-button--secondary"
+                                          onClick={() => useFileForSearch(file)}
+                                          size="xs"
+                                          variant="default"
+                                        >
+                                          Use for search
+                                        </Button>
+                                        <Button
+                                          className="vector-store-button vector-store-button--secondary"
+                                          onClick={() => useFileForAsk(file)}
+                                          size="xs"
+                                          variant="default"
+                                        >
+                                          Use for ask
+                                        </Button>
+                                        <Button
+                                          className="vector-store-button vector-store-button--secondary"
+                                          loading={savingMetadataFileId === file.id}
+                                          onClick={() => beginMetadataEdit(file)}
+                                          size="xs"
+                                          variant="default"
+                                        >
+                                          Edit metadata
+                                        </Button>
+                                        <Button
+                                          className="vector-store-button vector-store-button--danger"
+                                          loading={deletingFileId === file.id}
+                                          onClick={() => {
+                                            void deleteFile(file);
+                                          }}
+                                          size="xs"
+                                        >
+                                          Delete file
+                                        </Button>
+                                      </div>
+                                    </Table.Td>
+                                  </Table.Tr>
+                                ))}
+                              </Table.Tbody>
+                            </Table>
+                          </Table.ScrollContainer>
+                        ) : (
+                          <Alert className="vector-store-alert" data-tone="neutral" variant="light">
+                            This vector store does not have any attached files yet.
+                          </Alert>
+                        )}
 
-                        {filePreviewResult ? (
+                        {editingFile ? (
                           <Card className="vector-store-card vector-store-card--strong" padding="md" radius="md" withBorder>
                             <Stack gap="sm">
                               <Group justify="space-between" align="flex-start">
                                 <div>
                                   <Text className="vector-store-eyebrow" size="sm" fw={700}>
-                                    FILE PREVIEW
+                                    EDIT FILE METADATA
                                   </Text>
-                                  <Title order={5}>{filePreviewResult.filename}</Title>
+                                  <Title order={5}>{getFileLabel(editingFile)}</Title>
                                 </div>
-                                <Group gap="xs">
-                                  <Badge className="vector-store-badge vector-store-badge--soft" data-tone="neutral">
-                                    {formatBytes(filePreviewResult.bytes)}
-                                  </Badge>
-                                  <Badge className="vector-store-badge vector-store-badge--soft" data-tone="info">
-                                    {filePreviewResult.purpose}
-                                  </Badge>
-                                </Group>
+                                <Code>{editingFile.id}</Code>
                               </Group>
 
-                              <Code>{filePreviewResult.file_id}</Code>
+                              <Alert className="vector-store-alert" data-tone="info" variant="light">
+                                Reserved identity attributes stay managed by the server. Edit only the user-defined metadata below.
+                              </Alert>
 
-                              {filePreviewResult.preview_message ? (
-                                <Alert
-                                  className="vector-store-alert"
-                                  data-tone={filePreviewResult.preview_text === null ? "neutral" : "info"}
-                                  variant="light"
+                              <Textarea
+                                autosize
+                                label="User-defined attributes (JSON object)"
+                                minRows={8}
+                                onChange={(event) => setMetadataDraft(event.currentTarget.value)}
+                                value={metadataDraft}
+                              />
+
+                              <div className="vector-store-inline-actions">
+                                <Button
+                                  className="vector-store-button vector-store-button--primary"
+                                  loading={savingMetadataFileId === editingFile.id}
+                                  onClick={() => {
+                                    void saveMetadata();
+                                  }}
                                 >
-                                  {filePreviewResult.preview_message}
-                                </Alert>
-                              ) : null}
-
-                              {filePreviewResult.preview_text !== null ? (
-                                <div className="vector-store-preview-surface">
-                                  <Text className="vector-store-preview-text" component="pre" size="sm">
-                                    {filePreviewResult.preview_text}
-                                  </Text>
-                                </div>
-                              ) : null}
+                                  Save metadata
+                                </Button>
+                                <Button
+                                  className="vector-store-button vector-store-button--secondary"
+                                  onClick={() => {
+                                    setEditingFileId(null);
+                                  }}
+                                  variant="default"
+                                >
+                                  Cancel
+                                </Button>
+                              </div>
                             </Stack>
                           </Card>
                         ) : null}
@@ -612,6 +840,23 @@ function ConsoleScaffold(props: { bridge: VectorStoreConsoleBridge; hostContext?
                         />
                         <div className="vector-store-action-grid">
                           <Select
+                            data={searchScopeOptions}
+                            label="Search scope"
+                            onChange={(value) => {
+                              if (value === "vector_store" || value === null) {
+                                setSearchScopeMode("vector_store");
+                                setSearchScopeFileId(null);
+                                setSearchScopeFilename(null);
+                                return;
+                              }
+                              const file = getScopeFile(selectedFiles, value);
+                              if (file) {
+                                useFileForSearch(file);
+                              }
+                            }}
+                            value={searchScopeMode === "file" ? searchScopeFileId : "vector_store"}
+                          />
+                          <Select
                             data={RESULT_SIZE_OPTIONS}
                             label="Max results"
                             onChange={(value) => {
@@ -640,12 +885,25 @@ function ConsoleScaffold(props: { bridge: VectorStoreConsoleBridge; hostContext?
                           </Button>
                         </div>
 
+                        {searchScopeMode === "file" && searchScopeFileId ? (
+                          <Alert className="vector-store-alert" data-tone="info" variant="light">
+                            Searching within <Code>{searchScopeFilename ?? searchScopeFileId}</Code>.
+                          </Alert>
+                        ) : null}
+
                         {deferredSearchResult ? (
                           <Stack gap="md">
-                            <Group justify="space-between">
-                              <Text fw={700}>
-                                {deferredSearchResult.total_hits} hit(s) for <Code>{deferredSearchResult.query}</Code>
-                              </Text>
+                            <Group justify="space-between" align="flex-start">
+                              <Stack gap={4}>
+                                <Text fw={700}>
+                                  {deferredSearchResult.total_hits} hit(s) for <Code>{deferredSearchResult.query}</Code>
+                                </Text>
+                                {deferredSearchResult.file_id ? (
+                                  <Text c="dimmed" size="sm">
+                                    Scoped to {deferredSearchResult.filename ?? deferredSearchResult.file_id}
+                                  </Text>
+                                ) : null}
+                              </Stack>
                             </Group>
                             <Table.ScrollContainer minWidth={720} type="native">
                               <Table className="vector-store-table" striped withTableBorder>
@@ -679,7 +937,7 @@ function ConsoleScaffold(props: { bridge: VectorStoreConsoleBridge; hostContext?
                           </Stack>
                         ) : (
                           <Alert className="vector-store-alert" data-tone="neutral" variant="light">
-                            Run a raw search to inspect the exact chunks coming back from the selected store.
+                            Run a raw search to inspect the exact chunks coming back from the selected store or from one attached file.
                           </Alert>
                         )}
                       </Stack>
@@ -696,6 +954,23 @@ function ConsoleScaffold(props: { bridge: VectorStoreConsoleBridge; hostContext?
                           value={question}
                         />
                         <div className="vector-store-action-grid vector-store-action-grid--compact">
+                          <Select
+                            data={askScopeOptions}
+                            label="Ask scope"
+                            onChange={(value) => {
+                              if (value === "vector_store" || value === null) {
+                                setAskScopeMode("vector_store");
+                                setAskScopeFileId(null);
+                                setAskScopeFilename(null);
+                                return;
+                              }
+                              const file = getScopeFile(selectedFiles, value);
+                              if (file) {
+                                useFileForAsk(file);
+                              }
+                            }}
+                            value={askScopeMode === "file" ? askScopeFileId : "vector_store"}
+                          />
                           <Select
                             data={RESULT_SIZE_OPTIONS}
                             label="Max search results"
@@ -717,6 +992,12 @@ function ConsoleScaffold(props: { bridge: VectorStoreConsoleBridge; hostContext?
                           </Button>
                         </div>
 
+                        {askScopeMode === "file" && askScopeFileId ? (
+                          <Alert className="vector-store-alert" data-tone="info" variant="light">
+                            Asking only against <Code>{askScopeFilename ?? askScopeFileId}</Code>.
+                          </Alert>
+                        ) : null}
+
                         {askResult ? (
                           <Stack gap="md">
                             <Card className="vector-store-card vector-store-card--strong" padding="md" radius="md" withBorder>
@@ -727,6 +1008,11 @@ function ConsoleScaffold(props: { bridge: VectorStoreConsoleBridge; hostContext?
                                     {askResult.model}
                                   </Badge>
                                 </Group>
+                                {askResult.file_id ? (
+                                  <Text c="dimmed" size="sm">
+                                    Scoped to {askResult.filename ?? askResult.file_id}
+                                  </Text>
+                                ) : null}
                                 <Text className="vector-store-answer">{askResult.answer}</Text>
                               </Stack>
                             </Card>
@@ -755,9 +1041,9 @@ function ConsoleScaffold(props: { bridge: VectorStoreConsoleBridge; hostContext?
                                         </Stack>
                                       </Table.Td>
                                       <Table.Td>
-                                        {searchCall.queries.map((query) => (
-                                          <Text key={query} size="sm">
-                                            {query}
+                                        {searchCall.queries.map((queryValue) => (
+                                          <Text key={queryValue} size="sm">
+                                            {queryValue}
                                           </Text>
                                         ))}
                                       </Table.Td>

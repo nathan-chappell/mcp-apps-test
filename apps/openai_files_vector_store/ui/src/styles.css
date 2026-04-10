@@ -208,6 +208,12 @@ body {
   --button-bd: 1px solid var(--vector-store-tone-info-border);
 }
 
+.vector-store-button--danger {
+  --button-bg: var(--vector-store-tone-danger-solid);
+  --button-hover: var(--vector-store-tone-danger-solid-hover);
+  --button-color: var(--vector-store-color-text-inverse);
+}
+
 .vector-store-badge {
   --badge-radius: var(--border-radius-full, 999px);
   letter-spacing: 0.02em;
@@ -318,13 +324,13 @@ body {
 
 .vector-store-action-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(12rem, 1fr) minmax(12rem, 1fr);
+  grid-template-columns: minmax(0, 1.2fr) minmax(10rem, 0.8fr) minmax(12rem, 1fr) minmax(11rem, 0.9fr);
   gap: 0.75rem;
   align-items: end;
 }
 
 .vector-store-action-grid--compact {
-  grid-template-columns: minmax(0, 1fr) minmax(14rem, 1fr);
+  grid-template-columns: minmax(0, 1.2fr) minmax(10rem, 0.8fr) minmax(12rem, 0.9fr);
 }
 
 .vector-store-table {
@@ -352,22 +358,22 @@ body {
   color: var(--vector-store-color-text-secondary);
 }
 
-.vector-store-preview-surface {
-  max-height: 24rem;
-  overflow: auto;
-  padding: 0.875rem 1rem;
-  border: 1px solid var(--vector-store-color-border);
-  border-radius: var(--border-radius-md, 18px);
-  background: color-mix(in srgb, var(--vector-store-color-surface-ghost) 82%, var(--vector-store-card-background-strong));
+.vector-store-attribute-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.375rem;
 }
 
-.vector-store-preview-text {
-  margin: 0;
-  white-space: pre-wrap;
-  word-break: break-word;
-  line-height: 1.6;
-  color: var(--vector-store-color-text);
-  font-family: var(--vector-store-font-mono);
+.vector-store-action-button-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.vector-store-inline-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
 }
 
 .vector-store-tabs .mantine-Tabs-list {

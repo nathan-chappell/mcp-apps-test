@@ -8,17 +8,8 @@ export interface FileCountsSummary {
   total: number;
 }
 
-export interface FilePreviewResult {
-  vector_store_id: string;
-  file_id: string;
-  filename: string;
-  bytes: number;
-  purpose: string;
-  status: string;
-  preview_text: string | null;
-  preview_truncated: boolean;
-  preview_message: string | null;
-}
+export type AttributeValue = string | number | boolean;
+export type ScopeMode = "vector_store" | "file";
 
 export interface VectorStoreSummary {
   id: string;
@@ -38,7 +29,7 @@ export interface VectorStoreFileSummary {
   status: string;
   usage_bytes: number;
   vector_store_id: string;
-  attributes: Record<string, string | number | boolean> | null;
+  attributes: Record<string, AttributeValue> | null;
   last_error: string | null;
 }
 
@@ -55,7 +46,7 @@ export interface SearchHit {
   filename: string;
   score: number;
   text: string;
-  attributes: Record<string, string | number | boolean> | null;
+  attributes: Record<string, AttributeValue> | null;
 }
 
 export interface FileSearchCallSummary {
@@ -80,6 +71,8 @@ export interface VectorStoreStatusResult {
 export interface SearchVectorStoreResult {
   vector_store_id: string;
   query: string;
+  file_id: string | null;
+  filename: string | null;
   hits: SearchHit[];
   total_hits: number;
 }
@@ -87,20 +80,33 @@ export interface SearchVectorStoreResult {
 export interface AskVectorStoreResult {
   vector_store_id: string;
   question: string;
+  file_id: string | null;
+  filename: string | null;
   answer: string;
   model: string;
   search_calls: FileSearchCallSummary[];
+}
+
+export interface DeleteFileResult {
+  file_id: string;
+  deleted: boolean;
 }
 
 export interface SearchPanelState {
   query: string;
   max_num_results: number;
   rewrite_query: boolean;
+  scope: ScopeMode;
+  file_id: string | null;
+  filename: string | null;
 }
 
 export interface AskPanelState {
   question: string;
   max_num_results: number;
+  scope: ScopeMode;
+  file_id: string | null;
+  filename: string | null;
 }
 
 export interface OpenVectorStoreConsoleResult {
@@ -126,21 +132,35 @@ export interface SearchVectorStoreArguments {
   query: string;
   max_num_results?: number;
   rewrite_query?: boolean;
+  file_id?: string;
+  filename?: string;
 }
 
 export interface AskVectorStoreArguments {
   vector_store_id: string;
   question: string;
   max_num_results?: number;
+  file_id?: string;
+  filename?: string;
 }
 
-export interface PreviewFileArguments {
+export interface UpdateVectorStoreFileAttributesArguments {
   vector_store_id: string;
   file_id: string;
-  max_chars?: number;
+  attributes?: Record<string, AttributeValue>;
 }
 
-export type ToolResultName = "list_vector_stores" | "get_vector_store_status" | "search_vector_store" | "ask_vector_store" | "preview_file";
+export interface DeleteFileArguments {
+  file_id: string;
+}
+
+export type ToolResultName =
+  | "list_vector_stores"
+  | "get_vector_store_status"
+  | "search_vector_store"
+  | "ask_vector_store"
+  | "update_vector_store_file_attributes"
+  | "delete_file";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;

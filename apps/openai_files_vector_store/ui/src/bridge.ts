@@ -3,15 +3,17 @@ import type { App, McpUiHostContext } from "@modelcontextprotocol/ext-apps";
 import type {
   AskVectorStoreArguments,
   AskVectorStoreResult,
-  FilePreviewResult,
+  DeleteFileArguments,
+  DeleteFileResult,
   GetVectorStoreStatusArguments,
   ListVectorStoresArguments,
   OpenVectorStoreConsoleResult,
-  PreviewFileArguments,
   SearchVectorStoreArguments,
   SearchVectorStoreResult,
   ToolResultName,
+  UpdateVectorStoreFileAttributesArguments,
   VectorStoreListResult,
+  VectorStoreFileSummary,
   VectorStoreStatusResult,
 } from "./types";
 import { getStructuredContent } from "./types";
@@ -24,7 +26,8 @@ export interface VectorStoreConsoleBridge {
   get_vector_store_status(args: GetVectorStoreStatusArguments): Promise<VectorStoreStatusResult>;
   search_vector_store(args: SearchVectorStoreArguments): Promise<SearchVectorStoreResult>;
   ask_vector_store(args: AskVectorStoreArguments): Promise<AskVectorStoreResult>;
-  preview_file(args: PreviewFileArguments): Promise<FilePreviewResult>;
+  update_vector_store_file_attributes(args: UpdateVectorStoreFileAttributesArguments): Promise<VectorStoreFileSummary>;
+  delete_file(args: DeleteFileArguments): Promise<DeleteFileResult>;
 }
 
 async function callStructuredTool<T>(
@@ -35,7 +38,8 @@ async function callStructuredTool<T>(
     | GetVectorStoreStatusArguments
     | SearchVectorStoreArguments
     | AskVectorStoreArguments
-    | PreviewFileArguments,
+    | UpdateVectorStoreFileAttributesArguments
+    | DeleteFileArguments,
 ): Promise<T> {
   const result = await app.callServerTool({
     name,
@@ -65,8 +69,11 @@ export function createHostBridge(
     ask_vector_store(args) {
       return callStructuredTool<AskVectorStoreResult>(app, "ask_vector_store", args);
     },
-    preview_file(args) {
-      return callStructuredTool<FilePreviewResult>(app, "preview_file", args);
+    update_vector_store_file_attributes(args) {
+      return callStructuredTool<VectorStoreFileSummary>(app, "update_vector_store_file_attributes", args);
+    },
+    delete_file(args) {
+      return callStructuredTool<DeleteFileResult>(app, "delete_file", args);
     },
   };
 }

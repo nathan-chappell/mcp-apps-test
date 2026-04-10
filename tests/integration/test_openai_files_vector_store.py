@@ -14,11 +14,12 @@ from pydantic import BaseModel
 from apps.openai_files_vector_store.backend.schemas import (
     AskVectorStoreResult,
     AttachFilesResult,
+    DeletedFileResult,
     FileListResult,
-    FilePreviewResult,
     OpenVectorStoreConsoleResult,
     SearchVectorStoreResult,
     UploadFileResult,
+    VectorStoreFileSummary,
     VectorStoreListResult,
     VectorStoreStatusResult,
     VectorStoreSummary,
@@ -57,13 +58,14 @@ async def test_server_exposes_expected_tools() -> None:
         "open_vector_store_console",
         "upload_file",
         "list_files",
-        "preview_file",
         "create_vector_store",
         "list_vector_stores",
         "attach_files_to_vector_store",
         "get_vector_store_status",
         "search_vector_store",
         "ask_vector_store",
+        "update_vector_store_file_attributes",
+        "delete_file",
     }
 
 
@@ -105,35 +107,48 @@ async def test_server_exposes_console_resource(
 
 
 @pytest.mark.asyncio
-async def test_live_upload_attach_search_and_ask(
+async def test_live_retrieval_scoping_metadata_and_delete(
     tmp_path: Path,
 ) -> None:
     settings = AppSettings()
     server = create_server(settings)
     cleanup_client = OpenAI(api_key=settings.openai_api_key.get_secret_value())
 
-    marker = f"nebula-lighthouse-{uuid.uuid4().hex[:8]}"
-    local_file = tmp_path / "facts.txt"
-    local_file.write_text(
+    marker_primary = f"nebula-lighthouse-{uuid.uuid4().hex[:8]}"
+    marker_secondary = f"aurora-capsule-{uuid.uuid4().hex[:8]}"
+    primary_file = tmp_path / "primary-facts.txt"
+    primary_file.write_text(
         "\n".join(
             [
-                "This file exists for the MCP integration test.",
-                f"The retrieval marker is {marker}.",
-                "Use that exact marker when answering questions.",
+                "This file exists for the primary MCP integration test flow.",
+                f"The primary retrieval marker is {marker_primary}.",
+                "Use that exact primary marker when answering questions.",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    secondary_file = tmp_path / "secondary-facts.txt"
+    secondary_file.write_text(
+        "\n".join(
+            [
+                "This file exists for the secondary MCP integration test flow.",
+                f"The secondary retrieval marker is {marker_secondary}.",
+                "Use that exact secondary marker when answering questions.",
             ]
         ),
         encoding="utf-8",
     )
 
     vector_store_id: str | None = None
-    file_id: str | None = None
+    primary_file_id: str | None = None
+    secondary_file_id: str | None = None
     try:
         create_result = _structured_result(
             await server.call_tool(
                 "create_vector_store",
                 {
-                    "name": f"VS Code MCP Test {marker}",
-                    "metadata": {"test_case": marker},
+                    "name": f"VS Code MCP Test {marker_primary}",
+                    "metadata": {"test_case": marker_primary},
                 },
             ),
             VectorStoreSummary,
@@ -144,30 +159,48 @@ async def test_live_upload_attach_search_and_ask(
             await server.call_tool(
                 "upload_file",
                 {
-                    "local_path": str(local_file),
+                    "local_path": str(primary_file),
+                    "vector_store_id": vector_store_id,
+                    "attributes": {"dataset": "primary", "priority": 1},
                 },
             ),
             UploadFileResult,
         )
-        file_id = upload_result.uploaded_file.id
+        primary_file_id = upload_result.uploaded_file.id
+        assert upload_result.attached_file is not None
+        assert upload_result.attached_file.status == "completed"
+        assert upload_result.attached_file.attributes is not None
+        assert upload_result.attached_file.attributes["openai_file_id"] == primary_file_id
+        assert upload_result.attached_file.attributes["filename"] == primary_file.name
+        assert upload_result.attached_file.attributes["dataset"] == "primary"
+        assert upload_result.attached_file.attributes["priority"] == 1.0
 
         file_list_result = _structured_result(
             await server.call_tool("list_files", {"limit": 50}),
             FileListResult,
         )
-        assert any(file_entry.id == file_id for file_entry in file_list_result.files)
+        assert any(
+            file_entry.id == primary_file_id for file_entry in file_list_result.files
+        )
 
         attach_result = _structured_result(
             await server.call_tool(
                 "attach_files_to_vector_store",
                 {
                     "vector_store_id": vector_store_id,
-                    "file_ids": [file_id],
+                    "local_paths": [str(secondary_file)],
+                    "attributes": {"dataset": "secondary", "priority": 2},
                 },
             ),
             AttachFilesResult,
         )
         assert attach_result.attached_files[0].status == "completed"
+        assert attach_result.attached_files[0].attributes is not None
+        assert attach_result.attached_files[0].attributes["filename"] == secondary_file.name
+        assert attach_result.attached_files[0].attributes["dataset"] == "secondary"
+        assert attach_result.attached_files[0].attributes["priority"] == 2.0
+        secondary_file_id = attach_result.attached_files[0].id
+        assert attach_result.attached_files[0].attributes["openai_file_id"] == secondary_file_id
 
         console_result = _structured_result(
             await server.call_tool(
@@ -185,7 +218,9 @@ async def test_live_upload_attach_search_and_ask(
             == vector_store_id
         )
         assert console_result.search_panel.query == ""
+        assert console_result.search_panel.scope == "vector_store"
         assert console_result.ask_panel.question == ""
+        assert console_result.ask_panel.scope == "vector_store"
         assert any(
             vector_store.id == vector_store_id
             for vector_store in console_result.vector_store_list.vector_stores
@@ -210,61 +245,192 @@ async def test_live_upload_attach_search_and_ask(
             VectorStoreStatusResult,
         )
         assert status_result.vector_store.status in {"completed", "in_progress"}
-        assert any(vector_file.id == file_id for vector_file in status_result.files)
-
-        preview_result = _structured_result(
-            await server.call_tool(
-                "preview_file",
-                {
-                    "vector_store_id": vector_store_id,
-                    "file_id": file_id,
-                },
-            ),
-            FilePreviewResult,
+        primary_status_file = next(
+            vector_file
+            for vector_file in status_result.files
+            if vector_file.id == primary_file_id
         )
-        assert preview_result.vector_store_id == vector_store_id
-        assert preview_result.file_id == file_id
-        assert preview_result.filename == local_file.name
-        assert preview_result.preview_text is not None
-        assert marker in preview_result.preview_text
+        secondary_status_file = next(
+            vector_file
+            for vector_file in status_result.files
+            if vector_file.id == secondary_file_id
+        )
+        assert primary_status_file.attributes is not None
+        assert primary_status_file.attributes["filename"] == primary_file.name
+        assert primary_status_file.attributes["openai_file_id"] == primary_file_id
+        assert secondary_status_file.attributes is not None
+        assert secondary_status_file.attributes["filename"] == secondary_file.name
+        assert secondary_status_file.attributes["openai_file_id"] == secondary_file_id
 
         search_result = _structured_result(
             await server.call_tool(
                 "search_vector_store",
                 {
                     "vector_store_id": vector_store_id,
-                    "query": marker,
+                    "query": marker_primary,
                     "max_num_results": 5,
+                    "file_id": primary_file_id,
                 },
             ),
             SearchVectorStoreResult,
         )
         assert search_result.total_hits >= 1
-        assert any(marker in hit.text for hit in search_result.hits)
+        assert search_result.file_id == primary_file_id
+        assert all(hit.file_id == primary_file_id for hit in search_result.hits)
+        assert any(marker_primary in hit.text for hit in search_result.hits)
+        assert all(marker_secondary not in hit.text for hit in search_result.hits)
+
+        filename_scoped_search_result = _structured_result(
+            await server.call_tool(
+                "search_vector_store",
+                {
+                    "vector_store_id": vector_store_id,
+                    "query": marker_secondary,
+                    "max_num_results": 5,
+                    "filename": secondary_file.name,
+                },
+            ),
+            SearchVectorStoreResult,
+        )
+        assert filename_scoped_search_result.filename == secondary_file.name
+        assert all(hit.filename == secondary_file.name for hit in filename_scoped_search_result.hits)
+        assert any(
+            marker_secondary in hit.text
+            for hit in filename_scoped_search_result.hits
+        )
+        assert all(
+            marker_primary not in hit.text
+            for hit in filename_scoped_search_result.hits
+        )
 
         ask_result = _structured_result(
             await server.call_tool(
                 "ask_vector_store",
                 {
                     "vector_store_id": vector_store_id,
-                    "question": "What is the retrieval marker in the indexed document?",
+                    "question": "What is the primary retrieval marker in the indexed document?",
                     "max_num_results": 5,
+                    "file_id": primary_file_id,
                 },
             ),
             AskVectorStoreResult,
         )
-        assert marker in ask_result.answer
+        assert ask_result.file_id == primary_file_id
+        assert marker_primary in ask_result.answer
         assert ask_result.search_calls
         assert any(
-            marker in result.text
+            marker_primary in result.text
             for search_call in ask_result.search_calls
             for result in search_call.results
+        )
+        assert all(
+            marker_secondary not in result.text
+            for search_call in ask_result.search_calls
+            for result in search_call.results
+        )
+
+        filename_scoped_ask_result = _structured_result(
+            await server.call_tool(
+                "ask_vector_store",
+                {
+                    "vector_store_id": vector_store_id,
+                    "question": "What is the secondary retrieval marker in the indexed document?",
+                    "max_num_results": 5,
+                    "filename": secondary_file.name,
+                },
+            ),
+            AskVectorStoreResult,
+        )
+        assert filename_scoped_ask_result.filename == secondary_file.name
+        assert marker_secondary in filename_scoped_ask_result.answer
+        assert any(
+            marker_secondary in result.text
+            for search_call in filename_scoped_ask_result.search_calls
+            for result in search_call.results
+        )
+
+        updated_attributes_result = _structured_result(
+            await server.call_tool(
+                "update_vector_store_file_attributes",
+                {
+                    "vector_store_id": vector_store_id,
+                    "file_id": primary_file_id,
+                    "attributes": {
+                        "dataset": "primary-updated",
+                        "reviewed": True,
+                        "openai_file_id": "wrong-on-purpose",
+                    },
+                },
+            ),
+            VectorStoreFileSummary,
+        )
+        assert updated_attributes_result.attributes is not None
+        assert updated_attributes_result.attributes["dataset"] == "primary-updated"
+        assert updated_attributes_result.attributes["reviewed"] is True
+        assert updated_attributes_result.attributes["openai_file_id"] == primary_file_id
+        assert updated_attributes_result.attributes["filename"] == primary_file.name
+
+        refreshed_status_result = _structured_result(
+            await server.call_tool(
+                "get_vector_store_status",
+                {
+                    "vector_store_id": vector_store_id,
+                },
+            ),
+            VectorStoreStatusResult,
+        )
+        refreshed_primary_file = next(
+            vector_file
+            for vector_file in refreshed_status_result.files
+            if vector_file.id == primary_file_id
+        )
+        assert refreshed_primary_file.attributes is not None
+        assert refreshed_primary_file.attributes["dataset"] == "primary-updated"
+        assert refreshed_primary_file.attributes["reviewed"] is True
+        assert refreshed_primary_file.attributes["filename"] == primary_file.name
+
+        deleted_file_result = _structured_result(
+            await server.call_tool(
+                "delete_file",
+                {
+                    "file_id": secondary_file_id,
+                },
+            ),
+            DeletedFileResult,
+        )
+        assert deleted_file_result.file_id == secondary_file_id
+        assert deleted_file_result.deleted is True
+        secondary_file_id = None
+
+        file_list_after_delete = _structured_result(
+            await server.call_tool("list_files", {"limit": 50}),
+            FileListResult,
+        )
+        assert all(
+            file_entry.id != deleted_file_result.file_id
+            for file_entry in file_list_after_delete.files
+        )
+
+        status_after_delete = _structured_result(
+            await server.call_tool(
+                "get_vector_store_status",
+                {
+                    "vector_store_id": vector_store_id,
+                },
+            ),
+            VectorStoreStatusResult,
+        )
+        assert all(
+            vector_file.id != deleted_file_result.file_id
+            for vector_file in status_after_delete.files
         )
     finally:
         if vector_store_id is not None:
             cleanup_client.vector_stores.delete(vector_store_id)
-        if file_id is not None:
-            cleanup_client.files.delete(file_id)
+        if primary_file_id is not None:
+            cleanup_client.files.delete(primary_file_id)
+        if secondary_file_id is not None:
+            cleanup_client.files.delete(secondary_file_id)
 
 
 def _structured_result(

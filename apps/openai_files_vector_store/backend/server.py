@@ -14,7 +14,6 @@ from .openai_gateway import OpenAIFilesVectorStoreGateway
 from .qa_agent import VectorStoreQuestionAnswerer
 from .schemas import (
     AskPanelState,
-    FilePreviewResult,
     OpenVectorStoreConsoleResult,
     SearchPanelState,
     ToolAttributes,
@@ -30,7 +29,6 @@ CONSOLE_RESOURCE_URI = "ui://openai-files-vector-store/console.html"
 CONSOLE_UI_PATH = (
     Path(__file__).resolve().parent.parent / "ui" / "dist" / "mcp-app.html"
 )
-DEFAULT_FILE_PREVIEW_MAX_CHARS = 32_768
 
 
 def create_server(settings: AppSettings | None = None) -> FastMCP:
@@ -156,7 +154,10 @@ def create_server(settings: AppSettings | None = None) -> FastMCP:
     @server.tool(
         name="list_files",
         title="List Files",
-        description="List recent OpenAI files and optionally filter them by purpose.",
+        description=(
+            "List recent OpenAI files and optionally filter them by purpose, whether "
+            "or not they are attached to a vector store."
+        ),
         annotations=ToolAnnotations(
             readOnlyHint=True,
             destructiveHint=False,
@@ -170,39 +171,6 @@ def create_server(settings: AppSettings | None = None) -> FastMCP:
     ) -> CallToolResult:
         payload = gateway.list_files(limit=limit, purpose=purpose)
         summary = f"Returned {payload.total_returned} file(s)."
-        return _tool_result(summary, payload)
-
-    @server.tool(
-        name="preview_file",
-        title="Preview File",
-        description=(
-            "Fetch a text preview for a single OpenAI file so the MCP app can "
-            "inspect listed files inline."
-        ),
-        annotations=ToolAnnotations(
-            readOnlyHint=True,
-            destructiveHint=False,
-            idempotentHint=True,
-            openWorldHint=True,
-        ),
-        meta={"ui": {"visibility": ["app"]}},
-    )
-    def preview_file(
-        vector_store_id: Annotated[str, Field(min_length=1)],
-        file_id: Annotated[str, Field(min_length=1)],
-        max_chars: Annotated[int | None, Field(ge=1, le=131_072)] = None,
-    ) -> CallToolResult:
-        payload = gateway.preview_file(
-            file_id=file_id,
-            vector_store_id=vector_store_id,
-            max_chars=max_chars or DEFAULT_FILE_PREVIEW_MAX_CHARS,
-        )
-        if payload.preview_text is None:
-            summary = f"Loaded metadata for {payload.filename}; inline preview is unavailable."
-        elif payload.preview_truncated:
-            summary = f"Loaded a truncated preview for {payload.filename}."
-        else:
-            summary = f"Loaded a preview for {payload.filename}."
         return _tool_result(summary, payload)
 
     @server.tool(
@@ -310,7 +278,10 @@ def create_server(settings: AppSettings | None = None) -> FastMCP:
     @server.tool(
         name="search_vector_store",
         title="Search Vector Store",
-        description="Run a direct vector store search and return raw matching chunks.",
+        description=(
+            "Run a direct vector store search and return raw matching chunks. "
+            "Optionally scope the search to a single attached file by file ID and/or filename."
+        ),
         annotations=ToolAnnotations(
             readOnlyHint=True,
             destructiveHint=False,
@@ -323,6 +294,8 @@ def create_server(settings: AppSettings | None = None) -> FastMCP:
         query: Annotated[str, Field(min_length=1)],
         max_num_results: Annotated[int | None, Field(ge=1)] = None,
         rewrite_query: bool = False,
+        file_id: Annotated[str | None, Field(min_length=1)] = None,
+        filename: Annotated[str | None, Field(min_length=1)] = None,
     ) -> CallToolResult:
         payload = gateway.search_vector_store(
             vector_store_id=vector_store_id,
@@ -330,8 +303,14 @@ def create_server(settings: AppSettings | None = None) -> FastMCP:
             max_num_results=max_num_results
             or resolved_settings.openai_file_search_max_results,
             rewrite_query=rewrite_query,
+            file_id=file_id,
+            filename=filename,
         )
         summary = f"Found {payload.total_hits} hit(s) for query '{query}'."
+        if file_id is not None:
+            summary += f" Scoped to file {file_id}."
+        elif filename is not None:
+            summary += f" Scoped to filename {filename}."
         return _tool_result(summary, payload)
 
     @server.tool(
@@ -339,7 +318,8 @@ def create_server(settings: AppSettings | None = None) -> FastMCP:
         title="Ask Vector Store",
         description=(
             "Use openai-agents with hosted file_search to answer a question over a selected "
-            "vector store and include the supporting search hits."
+            "vector store and include the supporting search hits. Optionally scope the "
+            "retrieval to a single attached file by file ID and/or filename."
         ),
         annotations=ToolAnnotations(
             readOnlyHint=True,
@@ -352,13 +332,64 @@ def create_server(settings: AppSettings | None = None) -> FastMCP:
         vector_store_id: Annotated[str, Field(min_length=1)],
         question: Annotated[str, Field(min_length=1)],
         max_num_results: Annotated[int | None, Field(ge=1)] = None,
+        file_id: Annotated[str | None, Field(min_length=1)] = None,
+        filename: Annotated[str | None, Field(min_length=1)] = None,
     ) -> CallToolResult:
         payload = await question_answerer.ask(
             vector_store_id=vector_store_id,
             question=question,
             max_num_results=max_num_results,
+            file_id=file_id,
+            filename=filename,
         )
         return _tool_result(payload.answer, payload)
+
+    @server.tool(
+        name="update_vector_store_file_attributes",
+        title="Update Vector Store File Attributes",
+        description=(
+            "Replace the user-defined attributes for an attached vector store file while "
+            "preserving reserved identity attributes used for retrieval scoping."
+        ),
+        annotations=ToolAnnotations(
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=True,
+        ),
+        meta={"ui": {"visibility": ["app"]}},
+    )
+    def update_vector_store_file_attributes(
+        vector_store_id: Annotated[str, Field(min_length=1)],
+        file_id: Annotated[str, Field(min_length=1)],
+        attributes: ToolAttributes | None = None,
+    ) -> CallToolResult:
+        payload = gateway.update_vector_store_file_attributes(
+            vector_store_id=vector_store_id,
+            file_id=file_id,
+            attributes=attributes,
+        )
+        summary = f"Updated attributes for file {file_id} in vector store {vector_store_id}."
+        return _tool_result(summary, payload)
+
+    @server.tool(
+        name="delete_file",
+        title="Delete File",
+        description=(
+            "Delete an OpenAI file globally. Any vector store attachments that depend on it "
+            "will stop being usable once the file is deleted."
+        ),
+        annotations=ToolAnnotations(
+            destructiveHint=True,
+            idempotentHint=False,
+            openWorldHint=True,
+        ),
+    )
+    def delete_file(
+        file_id: Annotated[str, Field(min_length=1)],
+    ) -> CallToolResult:
+        payload = gateway.delete_file(file_id=file_id)
+        summary = f"Deleted file {file_id}."
+        return _tool_result(summary, payload)
 
     @server.resource(
         CONSOLE_RESOURCE_URI,
@@ -409,13 +440,14 @@ def create_server(settings: AppSettings | None = None) -> FastMCP:
             "open_vector_store_console",
             "upload_file",
             "list_files",
-            "preview_file",
             "create_vector_store",
             "list_vector_stores",
             "attach_files_to_vector_store",
             "get_vector_store_status",
             "search_vector_store",
             "ask_vector_store",
+            "update_vector_store_file_attributes",
+            "delete_file",
         ],
     )
     return server
