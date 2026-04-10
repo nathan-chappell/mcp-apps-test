@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Annotated
 
 from mcp.server.fastmcp import FastMCP
@@ -11,10 +12,23 @@ from pydantic import BaseModel, Field
 from .logging import configure_logging
 from .openai_gateway import OpenAIFilesVectorStoreGateway
 from .qa_agent import VectorStoreQuestionAnswerer
-from .schemas import ToolAttributes, VectorStoreMetadata
+from .schemas import (
+    AskPanelState,
+    OpenVectorStoreConsoleResult,
+    SearchPanelState,
+    ToolAttributes,
+    VectorStoreMetadata,
+    VectorStoreListResult,
+)
 from .settings import AppSettings, get_settings
 
 logger = logging.getLogger(__name__)
+
+RESOURCE_MIME_TYPE = "text/html;profile=mcp-app"
+CONSOLE_RESOURCE_URI = "ui://openai-files-vector-store/console.html"
+CONSOLE_UI_PATH = (
+    Path(__file__).resolve().parent.parent / "ui" / "dist" / "mcp-app.html"
+)
 
 
 def create_server(settings: AppSettings | None = None) -> FastMCP:
@@ -35,6 +49,72 @@ def create_server(settings: AppSettings | None = None) -> FastMCP:
         ),
         log_level=resolved_settings.log_level,
     )
+
+    @server.tool(
+        name="open_vector_store_console",
+        title="Open Vector Store Console",
+        description=(
+            "Open the interactive vector store console and seed it with the current "
+            "vector store list, selected store status, and empty retrieval panels."
+        ),
+        annotations=ToolAnnotations(
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=True,
+        ),
+        meta={"ui": {"resourceUri": CONSOLE_RESOURCE_URI}},
+    )
+    def open_vector_store_console(
+        vector_store_id: Annotated[str | None, Field(min_length=1)] = None,
+    ) -> CallToolResult:
+        vector_store_list = gateway.list_vector_stores(limit=20)
+        selected_vector_store_id = vector_store_id
+        if selected_vector_store_id is None and vector_store_list.vector_stores:
+            selected_vector_store_id = vector_store_list.vector_stores[0].id
+
+        selected_vector_store_status = None
+        if selected_vector_store_id is not None:
+            selected_vector_store_status = gateway.get_vector_store_status(
+                vector_store_id=selected_vector_store_id,
+                file_limit=20,
+                batch_id=None,
+            )
+            if not any(
+                vector_store.id == selected_vector_store_id
+                for vector_store in vector_store_list.vector_stores
+            ):
+                vector_store_list = VectorStoreListResult(
+                    vector_stores=[
+                        selected_vector_store_status.vector_store,
+                        *vector_store_list.vector_stores,
+                    ],
+                    total_returned=len(vector_store_list.vector_stores) + 1,
+                )
+
+        payload = OpenVectorStoreConsoleResult(
+            vector_store_list=vector_store_list,
+            selected_vector_store_id=selected_vector_store_id,
+            selected_vector_store_status=selected_vector_store_status,
+            search_panel=SearchPanelState(
+                max_num_results=resolved_settings.openai_file_search_max_results,
+            ),
+            ask_panel=AskPanelState(
+                max_num_results=resolved_settings.openai_file_search_max_results,
+            ),
+        )
+        if selected_vector_store_id is None:
+            summary = "Opened vector store console with no vector stores yet."
+        else:
+            summary = (
+                f"Opened vector store console for {selected_vector_store_id} with "
+                f"{payload.vector_store_list.total_returned} available store(s)."
+            )
+        return _tool_result(
+            summary,
+            payload,
+            meta={"ui": {"resourceUri": CONSOLE_RESOURCE_URI}},
+        )
 
     @server.tool(
         name="upload_file",
@@ -245,10 +325,53 @@ def create_server(settings: AppSettings | None = None) -> FastMCP:
         )
         return _tool_result(payload.answer, payload)
 
+    @server.resource(
+        CONSOLE_RESOURCE_URI,
+        name="open_vector_store_console_resource",
+        title="OpenAI Files Vector Store Console",
+        description=(
+            "Single-file React UI for browsing vector stores, inspecting ingestion "
+            "status, and running retrieval workflows."
+        ),
+        mime_type=RESOURCE_MIME_TYPE,
+    )
+    def open_vector_store_console_resource() -> str:
+        if not CONSOLE_UI_PATH.is_file():
+            logger.warning(
+                "mcp_app_resource_missing uri=%s path=%s",
+                CONSOLE_RESOURCE_URI,
+                CONSOLE_UI_PATH,
+            )
+            return """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Vector Store Console Build Required</title>
+</head>
+<body>
+  <main style="font-family: sans-serif; padding: 24px;">
+    <h1>Vector Store Console UI not built yet</h1>
+    <p>Run <code>npm install</code> and <code>npm run build:watch</code> in <code>apps/openai_files_vector_store/ui</code>, then reopen the tool.</p>
+  </main>
+</body>
+</html>
+"""
+
+        html = CONSOLE_UI_PATH.read_text(encoding="utf-8")
+        logger.info(
+            "mcp_app_resource_ready uri=%s bytes=%s path=%s",
+            CONSOLE_RESOURCE_URI,
+            len(html),
+            CONSOLE_UI_PATH,
+        )
+        return html
+
     logger.info(
         "mcp_server_ready name=%s tools=%s",
         resolved_settings.app_name,
         [
+            "open_vector_store_console",
             "upload_file",
             "list_files",
             "create_vector_store",
@@ -262,8 +385,14 @@ def create_server(settings: AppSettings | None = None) -> FastMCP:
     return server
 
 
-def _tool_result(summary: str, payload: BaseModel) -> CallToolResult:
+def _tool_result(
+    summary: str,
+    payload: BaseModel,
+    *,
+    meta: dict[str, object] | None = None,
+) -> CallToolResult:
     return CallToolResult(
+        meta=meta,
         content=[TextContent(type="text", text=summary)],
         structuredContent=payload.model_dump(mode="json"),
     )

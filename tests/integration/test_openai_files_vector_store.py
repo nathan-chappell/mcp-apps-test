@@ -2,14 +2,23 @@ from __future__ import annotations
 
 import uuid
 from pathlib import Path
+import subprocess
 
 import pytest
 from mcp.types import CallToolResult
 from openai import OpenAI
 from pydantic import ValidationError
 
-from apps.openai_files_vector_store.backend.server import create_server
+from apps.openai_files_vector_store.backend.server import (
+    CONSOLE_RESOURCE_URI,
+    RESOURCE_MIME_TYPE,
+    create_server,
+)
 from apps.openai_files_vector_store.backend.settings import AppSettings
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+UI_DIR = REPO_ROOT / "apps/openai_files_vector_store/ui"
+UI_DIST_PATH = UI_DIR / "dist/mcp-app.html"
 
 
 def test_settings_require_openai_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -28,6 +37,7 @@ async def test_server_exposes_expected_tools(monkeypatch: pytest.MonkeyPatch) ->
     tool_names = {tool.name for tool in await server.list_tools()}
 
     assert tool_names == {
+        "open_vector_store_console",
         "upload_file",
         "list_files",
         "create_vector_store",
@@ -37,6 +47,41 @@ async def test_server_exposes_expected_tools(monkeypatch: pytest.MonkeyPatch) ->
         "search_vector_store",
         "ask_vector_store",
     }
+
+
+@pytest.fixture(scope="session")
+def built_console_ui() -> Path:
+    subprocess.run(
+        ["npm", "run", "build"],
+        check=True,
+        cwd=UI_DIR,
+    )
+    assert UI_DIST_PATH.is_file()
+    return UI_DIST_PATH
+
+
+@pytest.mark.asyncio
+async def test_server_exposes_console_resource(
+    monkeypatch: pytest.MonkeyPatch,
+    built_console_ui: Path,
+) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    settings = AppSettings()
+    server = create_server(settings)
+
+    resources = await server.list_resources()
+    resource = next(
+        resource_item
+        for resource_item in resources
+        if str(resource_item.uri) == CONSOLE_RESOURCE_URI
+    )
+    assert resource.mimeType == RESOURCE_MIME_TYPE
+
+    contents = await server.read_resource(CONSOLE_RESOURCE_URI)
+    assert len(contents) == 1
+    assert contents[0].mime_type == RESOURCE_MIME_TYPE
+    assert "<title>OpenAI Files Vector Store Console</title>" in contents[0].content
+    assert "vector-store-console-root" in contents[0].content
 
 
 @pytest.mark.asyncio
@@ -104,6 +149,26 @@ async def test_live_upload_attach_search_and_ask(
             )
         )
         assert attach_result["attached_files"][0]["status"] == "completed"
+
+        console_result = _structured_result(
+            await server.call_tool(
+                "open_vector_store_console",
+                {
+                    "vector_store_id": vector_store_id,
+                },
+            )
+        )
+        assert console_result["selected_vector_store_id"] == vector_store_id
+        assert (
+            console_result["selected_vector_store_status"]["vector_store"]["id"]
+            == vector_store_id
+        )
+        assert console_result["search_panel"]["query"] == ""
+        assert console_result["ask_panel"]["question"] == ""
+        assert any(
+            vector_store["id"] == vector_store_id
+            for vector_store in console_result["vector_store_list"]["vector_stores"]
+        )
 
         vector_store_list_result = _structured_result(
             await server.call_tool("list_vector_stores", {"limit": 50})

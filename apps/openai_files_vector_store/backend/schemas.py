@@ -229,3 +229,22 @@ class AskVectorStoreResult(BaseModel):
     answer: str
     model: str
     search_calls: list[FileSearchCallSummary]
+
+
+class SearchPanelState(BaseModel):
+    query: str = ""
+    max_num_results: int = 5
+    rewrite_query: bool = False
+
+
+class AskPanelState(BaseModel):
+    question: str = ""
+    max_num_results: int = 5
+
+
+class OpenVectorStoreConsoleResult(BaseModel):
+    vector_store_list: VectorStoreListResult
+    selected_vector_store_id: str | None = None
+    selected_vector_store_status: VectorStoreStatusResult | None = None
+    search_panel: SearchPanelState = Field(default_factory=SearchPanelState)
+    ask_panel: AskPanelState = Field(default_factory=AskPanelState)
