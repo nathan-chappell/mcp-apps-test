@@ -1,8 +1,0 @@
-[mcp_servers.openai-files-vector-store]
-command = "/home/uphill/programming/py/mcp-apps-test/.venv/bin/python"
-args = [
-  "-m",
-  "apps.openai_files_vector_store.backend.main",
-]
-cwd = "/home/uphill/programming/py/mcp-apps-test"
-env_vars = ["OPENAI_API_KEY"]

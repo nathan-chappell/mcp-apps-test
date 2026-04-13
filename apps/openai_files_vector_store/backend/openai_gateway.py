@@ -6,7 +6,7 @@ from pathlib import Path
 from time import perf_counter
 from typing import Any
 
-from openai import NotFoundError, OpenAI
+from openai import AsyncOpenAI, NotFoundError
 from openai.types.file_purpose import FilePurpose
 from openai.types.shared_params.comparison_filter import ComparisonFilter
 from openai.types.shared_params.compound_filter import CompoundFilter
@@ -40,10 +40,13 @@ class OpenAIFilesVectorStoreGateway:
 
     def __init__(self, settings: AppSettings) -> None:
         self._settings = settings
-        self._client = OpenAI(api_key=settings.openai_api_key.get_secret_value())
+        self._client = AsyncOpenAI(api_key=settings.openai_api_key.get_secret_value())
         self._logger = logging.getLogger(__name__)
 
-    def upload_file(
+    async def close(self) -> None:
+        await self._client.close()
+
+    async def upload_file(
         self,
         *,
         local_path: str,
@@ -55,7 +58,10 @@ class OpenAIFilesVectorStoreGateway:
         resolved_path = self._resolve_local_path(local_path)
 
         with resolved_path.open("rb") as file_handle:
-            uploaded_file = self._client.files.create(file=file_handle, purpose=purpose)
+            uploaded_file = await self._client.files.create(
+                file=file_handle,
+                purpose=purpose,
+            )
 
         attached_file: VectorStoreFileSummary | None = None
         normalized_attributes = self._normalize_attributes(attributes)
@@ -65,10 +71,8 @@ class OpenAIFilesVectorStoreGateway:
                 "vector_store_id": vector_store_id,
                 "poll_interval_ms": self._settings.openai_poll_interval_ms,
             }
-            self._client.vector_stores.files.create_and_poll(
-                **attach_kwargs
-            )
-            attached_file = self._update_vector_store_file_attributes(
+            await self._client.vector_stores.files.create_and_poll(**attach_kwargs)
+            attached_file = await self._update_vector_store_file_attributes(
                 vector_store_id=vector_store_id,
                 file_id=uploaded_file.id,
                 filename=uploaded_file.filename,
@@ -90,14 +94,14 @@ class OpenAIFilesVectorStoreGateway:
             attached_file=attached_file,
         )
 
-    def list_files(
+    async def list_files(
         self,
         *,
         limit: int,
         purpose: str | None,
     ) -> FileListResult:
         started_at = perf_counter()
-        page = self._client.files.list(limit=limit)
+        page = await self._client.files.list(limit=limit)
         files = [FileSummary.from_openai(file_object) for file_object in page.data]
         if purpose is not None:
             files = [
@@ -118,7 +122,7 @@ class OpenAIFilesVectorStoreGateway:
             purpose_filter=purpose,
         )
 
-    def create_vector_store(
+    async def create_vector_store(
         self,
         *,
         name: str | None,
@@ -134,7 +138,7 @@ class OpenAIFilesVectorStoreGateway:
         if metadata:
             create_kwargs["metadata"] = metadata
 
-        vector_store = self._client.vector_stores.create(**create_kwargs)
+        vector_store = await self._client.vector_stores.create(**create_kwargs)
 
         duration_ms = (perf_counter() - started_at) * 1000
         self._logger.info(
@@ -146,9 +150,9 @@ class OpenAIFilesVectorStoreGateway:
 
         return VectorStoreSummary.from_openai(vector_store)
 
-    def list_vector_stores(self, *, limit: int) -> VectorStoreListResult:
+    async def list_vector_stores(self, *, limit: int) -> VectorStoreListResult:
         started_at = perf_counter()
-        page = self._client.vector_stores.list(limit=limit)
+        page = await self._client.vector_stores.list(limit=limit)
         vector_stores = [
             VectorStoreSummary.from_openai(vector_store) for vector_store in page.data
         ]
@@ -165,7 +169,7 @@ class OpenAIFilesVectorStoreGateway:
             total_returned=len(vector_stores),
         )
 
-    def attach_files_to_vector_store(
+    async def attach_files_to_vector_store(
         self,
         *,
         vector_store_id: str,
@@ -194,12 +198,10 @@ class OpenAIFilesVectorStoreGateway:
                 "vector_store_id": vector_store_id,
                 "poll_interval_ms": self._settings.openai_poll_interval_ms,
             }
-            self._client.vector_stores.files.create_and_poll(
-                **attach_kwargs
-            )
-            file_object = self._client.files.retrieve(existing_file_ids[0])
+            await self._client.vector_stores.files.create_and_poll(**attach_kwargs)
+            file_object = await self._client.files.retrieve(existing_file_ids[0])
             attached_files = [
-                self._update_vector_store_file_attributes(
+                await self._update_vector_store_file_attributes(
                     vector_store_id=vector_store_id,
                     file_id=file_object.id,
                     filename=file_object.filename,
@@ -213,12 +215,12 @@ class OpenAIFilesVectorStoreGateway:
                     "file": file_handle,
                     "poll_interval_ms": self._settings.openai_poll_interval_ms,
                 }
-                vector_store_file = self._client.vector_stores.files.upload_and_poll(
+                vector_store_file = await self._client.vector_stores.files.upload_and_poll(
                     **upload_kwargs
                 )
-            file_object = self._client.files.retrieve(vector_store_file.id)
+            file_object = await self._client.files.retrieve(vector_store_file.id)
             attached_files = [
-                self._update_vector_store_file_attributes(
+                await self._update_vector_store_file_attributes(
                     vector_store_id=vector_store_id,
                     file_id=file_object.id,
                     filename=file_object.filename,
@@ -238,26 +240,27 @@ class OpenAIFilesVectorStoreGateway:
                     "max_concurrency": min(total_files, 5),
                     "poll_interval_ms": self._settings.openai_poll_interval_ms,
                 }
-                batch = self._client.vector_stores.file_batches.upload_and_poll(
+                batch = await self._client.vector_stores.file_batches.upload_and_poll(
                     **batch_kwargs
                 )
 
             batch_summary = VectorStoreBatchSummary.from_openai(batch)
-            batch_file_page = self._client.vector_stores.file_batches.list_files(
+            batch_file_page = await self._client.vector_stores.file_batches.list_files(
                 batch.id,
                 vector_store_id=vector_store_id,
                 limit=min(max(total_files, 20), 100),
             )
-            attached_files = [
-                self._update_vector_store_file_attributes(
-                    vector_store_id=vector_store_id,
-                    file_id=file_object.id,
-                    filename=file_object.filename,
-                    attributes=normalized_attributes,
+            attached_files = []
+            for vector_store_file in batch_file_page.data:
+                file_object = await self._client.files.retrieve(vector_store_file.id)
+                attached_files.append(
+                    await self._update_vector_store_file_attributes(
+                        vector_store_id=vector_store_id,
+                        file_id=file_object.id,
+                        filename=file_object.filename,
+                        attributes=normalized_attributes,
+                    )
                 )
-                for vector_store_file in batch_file_page.data
-                for file_object in [self._client.files.retrieve(vector_store_file.id)]
-            ]
 
         duration_ms = (perf_counter() - started_at) * 1000
         self._logger.info(
@@ -277,7 +280,7 @@ class OpenAIFilesVectorStoreGateway:
             batch=batch_summary,
         )
 
-    def get_vector_store_status(
+    async def get_vector_store_status(
         self,
         *,
         vector_store_id: str,
@@ -285,12 +288,12 @@ class OpenAIFilesVectorStoreGateway:
         batch_id: str | None,
     ) -> VectorStoreStatusResult:
         started_at = perf_counter()
-        vector_store = self._client.vector_stores.retrieve(vector_store_id)
-        vector_store_file_page = self._client.vector_stores.files.list(
+        vector_store = await self._client.vector_stores.retrieve(vector_store_id)
+        vector_store_file_page = await self._client.vector_stores.files.list(
             vector_store_id,
             limit=file_limit,
         )
-        files = self._existing_vector_store_files(
+        files = await self._existing_vector_store_files(
             vector_store_id=vector_store_id,
             vector_store_files=vector_store_file_page.data,
         )
@@ -298,17 +301,17 @@ class OpenAIFilesVectorStoreGateway:
         batch_summary: VectorStoreBatchSummary | None = None
         batch_files: list[VectorStoreFileSummary] = []
         if batch_id is not None:
-            batch = self._client.vector_stores.file_batches.retrieve(
+            batch = await self._client.vector_stores.file_batches.retrieve(
                 batch_id,
                 vector_store_id=vector_store_id,
             )
             batch_summary = VectorStoreBatchSummary.from_openai(batch)
-            batch_file_page = self._client.vector_stores.file_batches.list_files(
+            batch_file_page = await self._client.vector_stores.file_batches.list_files(
                 batch_id,
                 vector_store_id=vector_store_id,
                 limit=file_limit,
             )
-            batch_files = self._existing_vector_store_files(
+            batch_files = await self._existing_vector_store_files(
                 vector_store_id=vector_store_id,
                 vector_store_files=batch_file_page.data,
             )
@@ -329,7 +332,7 @@ class OpenAIFilesVectorStoreGateway:
             batch_files=batch_files,
         )
 
-    def search_vector_store(
+    async def search_vector_store(
         self,
         *,
         vector_store_id: str,
@@ -341,7 +344,7 @@ class OpenAIFilesVectorStoreGateway:
     ) -> SearchVectorStoreResult:
         started_at = perf_counter()
         filters = self._build_search_filters(file_id=file_id, filename=filename)
-        page = self._client.vector_stores.search(
+        page = await self._client.vector_stores.search(
             vector_store_id,
             query=query,
             max_num_results=max_num_results,
@@ -369,7 +372,7 @@ class OpenAIFilesVectorStoreGateway:
             total_hits=len(hits),
         )
 
-    def update_vector_store_file_attributes(
+    async def update_vector_store_file_attributes(
         self,
         *,
         vector_store_id: str,
@@ -377,9 +380,9 @@ class OpenAIFilesVectorStoreGateway:
         attributes: ToolAttributes | None,
     ) -> VectorStoreFileSummary:
         started_at = perf_counter()
-        file_object = self._client.files.retrieve(file_id)
+        file_object = await self._client.files.retrieve(file_id)
         normalized_attributes = self._normalize_attributes(attributes)
-        updated_file = self._update_vector_store_file_attributes(
+        updated_file = await self._update_vector_store_file_attributes(
             vector_store_id=vector_store_id,
             file_id=file_object.id,
             filename=file_object.filename,
@@ -395,9 +398,9 @@ class OpenAIFilesVectorStoreGateway:
         )
         return updated_file
 
-    def delete_file(self, *, file_id: str) -> DeletedFileResult:
+    async def delete_file(self, *, file_id: str) -> DeletedFileResult:
         started_at = perf_counter()
-        deleted_file = self._client.files.delete(file_id)
+        deleted_file = await self._client.files.delete(file_id)
         duration_ms = (perf_counter() - started_at) * 1000
         self._logger.info(
             "openai_file_delete file_id=%s deleted=%s duration_ms=%.1f",
@@ -430,7 +433,7 @@ class OpenAIFilesVectorStoreGateway:
                 normalized_attributes[key] = value
         return normalized_attributes
 
-    def _update_vector_store_file_attributes(
+    async def _update_vector_store_file_attributes(
         self,
         *,
         vector_store_id: str,
@@ -443,7 +446,7 @@ class OpenAIFilesVectorStoreGateway:
             RESERVED_FILE_ID_ATTRIBUTE: file_id,
             RESERVED_FILENAME_ATTRIBUTE: filename,
         }
-        vector_store_file = self._client.vector_stores.files.update(
+        vector_store_file = await self._client.vector_stores.files.update(
             file_id,
             vector_store_id=vector_store_id,
             attributes=merged_attributes,
@@ -480,7 +483,7 @@ class OpenAIFilesVectorStoreGateway:
             return filters[0]
         return {"type": "and", "filters": filters}
 
-    def _existing_vector_store_files(
+    async def _existing_vector_store_files(
         self,
         *,
         vector_store_id: str,
@@ -490,11 +493,11 @@ class OpenAIFilesVectorStoreGateway:
         missing_file_ids: list[str] = []
         for vector_store_file in vector_store_files:
             try:
-                self._client.files.retrieve(vector_store_file.id)
+                await self._client.files.retrieve(vector_store_file.id)
             except NotFoundError:
                 missing_file_ids.append(vector_store_file.id)
                 continue
-            refreshed_vector_store_file = self._client.vector_stores.files.retrieve(
+            refreshed_vector_store_file = await self._client.vector_stores.files.retrieve(
                 vector_store_file.id,
                 vector_store_id=vector_store_id,
             )

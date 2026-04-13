@@ -69,6 +69,30 @@ async def test_server_exposes_expected_tools() -> None:
     }
 
 
+@pytest.mark.asyncio
+async def test_server_registers_all_tools_as_async() -> None:
+    server = create_server(AppSettings())
+
+    tool_names = {
+        "open_vector_store_console",
+        "upload_file",
+        "list_files",
+        "create_vector_store",
+        "list_vector_stores",
+        "attach_files_to_vector_store",
+        "get_vector_store_status",
+        "search_vector_store",
+        "ask_vector_store",
+        "update_vector_store_file_attributes",
+        "delete_file",
+    }
+
+    for tool_name in tool_names:
+        tool = server._tool_manager.get_tool(tool_name)
+        assert tool is not None
+        assert tool.is_async
+
+
 @pytest.fixture(scope="session")
 def built_console_ui() -> Path:
     subprocess.run(
@@ -433,6 +457,117 @@ async def test_live_retrieval_scoping_metadata_and_delete(
             cleanup_client.files.delete(secondary_file_id)
 
 
+@pytest.mark.asyncio
+async def test_server_restart_does_not_require_local_history_or_create_repo_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo_status_before = _git_status_snapshot()
+    settings = AppSettings()
+    cleanup_client = OpenAI(api_key=settings.openai_api_key.get_secret_value())
+
+    marker = f"stateless-restart-{uuid.uuid4().hex[:8]}"
+    input_file = tmp_path / "restart-stateless.txt"
+    input_file.write_text(
+        "\n".join(
+            [
+                "This file verifies the MCP server stays near-stateless across restarts.",
+                f"The restart verification marker is {marker}.",
+                "The second server instance should find this marker using only OpenAI state.",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.chdir(tmp_path)
+
+    vector_store_id: str | None = None
+    file_id: str | None = None
+    try:
+        first_server = create_server(settings)
+
+        create_result = _structured_result(
+            await first_server.call_tool(
+                "create_vector_store",
+                {
+                    "name": f"Stateless Restart Test {marker}",
+                    "metadata": {"test_case": marker, "persistence": "stateless"},
+                },
+            ),
+            VectorStoreSummary,
+        )
+        vector_store_id = create_result.id
+
+        upload_result = _structured_result(
+            await first_server.call_tool(
+                "upload_file",
+                {
+                    "local_path": input_file.name,
+                    "vector_store_id": vector_store_id,
+                    "attributes": {"dataset": "restart-stateless"},
+                },
+            ),
+            UploadFileResult,
+        )
+        file_id = upload_result.uploaded_file.id
+        assert upload_result.attached_file is not None
+        assert upload_result.attached_file.status == "completed"
+
+        restarted_server = create_server(settings)
+
+        status_result = _structured_result(
+            await restarted_server.call_tool(
+                "get_vector_store_status",
+                {
+                    "vector_store_id": vector_store_id,
+                },
+            ),
+            VectorStoreStatusResult,
+        )
+        restored_file = next(
+            vector_file for vector_file in status_result.files if vector_file.id == file_id
+        )
+        assert restored_file.attributes is not None
+        assert restored_file.attributes["openai_file_id"] == file_id
+        assert restored_file.attributes["filename"] == input_file.name
+
+        search_result = _structured_result(
+            await restarted_server.call_tool(
+                "search_vector_store",
+                {
+                    "vector_store_id": vector_store_id,
+                    "query": marker,
+                    "max_num_results": 5,
+                    "file_id": file_id,
+                },
+            ),
+            SearchVectorStoreResult,
+        )
+        assert search_result.file_id == file_id
+        assert any(marker in hit.text for hit in search_result.hits)
+
+        console_result = _structured_result(
+            await restarted_server.call_tool(
+                "open_vector_store_console",
+                {
+                    "vector_store_id": vector_store_id,
+                },
+            ),
+            OpenVectorStoreConsoleResult,
+        )
+        assert console_result.selected_vector_store_id == vector_store_id
+        assert console_result.selected_vector_store_status is not None
+        assert console_result.selected_vector_store_status.vector_store.id == vector_store_id
+    finally:
+        if vector_store_id is not None:
+            cleanup_client.vector_stores.delete(vector_store_id)
+        if file_id is not None:
+            cleanup_client.files.delete(file_id)
+
+    assert sorted(path.name for path in tmp_path.iterdir()) == [input_file.name]
+    assert _git_status_snapshot() == repo_status_before
+
+
 def _structured_result(
     result: ToolCallResponse,
     result_type: type[ResultModelT],
@@ -445,3 +580,14 @@ def _structured_result(
     assert structured_content is not None
     assert isinstance(structured_content, dict)
     return result_type.model_validate(structured_content)
+
+
+def _git_status_snapshot() -> str:
+    result = subprocess.run(
+        ["git", "status", "--short", "--untracked-files=all"],
+        check=True,
+        capture_output=True,
+        cwd=REPO_ROOT,
+        text=True,
+    )
+    return result.stdout

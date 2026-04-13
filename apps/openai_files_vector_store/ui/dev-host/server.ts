@@ -12,6 +12,8 @@ const hostBindAddress = process.env.HOST_BIND_ADDRESS ?? "127.0.0.1";
 const hostPort = Number.parseInt(process.env.HOST_PORT ?? "8080", 10);
 const sandboxPort = Number.parseInt(process.env.SANDBOX_PORT ?? "8081", 10);
 const distDirectory = join(__dirname, "..", "host-dist");
+const hostIndexPath = join(distDirectory, "dev-host", "index.html");
+const sandboxIndexPath = join(distDirectory, "dev-host", "sandbox.html");
 const serverUrls = process.env.DEV_HOST_SERVERS ? JSON.parse(process.env.DEV_HOST_SERVERS) as string[] : ["http://127.0.0.1:8000/mcp"];
 
 function sanitizeCspDomains(domains?: string[]): string[] {
@@ -56,11 +58,14 @@ hostApp.use((request, response, next) => {
   next();
 });
 hostApp.use(express.static(distDirectory));
+hostApp.get("/index.html", (_request, response) => {
+  response.sendFile(hostIndexPath);
+});
 hostApp.get("/api/servers", (_request, response) => {
   response.json(serverUrls);
 });
 hostApp.get("/", (_request, response) => {
-  response.redirect("/index.html");
+  response.sendFile(hostIndexPath);
 });
 
 const sandboxApp = express();
@@ -79,7 +84,7 @@ sandboxApp.get(["/", "/sandbox.html"], (request, response) => {
   response.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
   response.setHeader("Pragma", "no-cache");
   response.setHeader("Expires", "0");
-  response.sendFile(join(distDirectory, "sandbox.html"));
+  response.sendFile(sandboxIndexPath);
 });
 sandboxApp.use((_request, response) => {
   response.status(404).send("Only sandbox.html is served on the sandbox port.");

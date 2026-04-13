@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 import logging
 from pathlib import Path
 from typing import Annotated
@@ -40,6 +42,13 @@ def create_server(settings: AppSettings | None = None) -> FastMCP:
     gateway = OpenAIFilesVectorStoreGateway(resolved_settings)
     question_answerer = VectorStoreQuestionAnswerer(resolved_settings)
 
+    @asynccontextmanager
+    async def server_lifespan(_: FastMCP[None]) -> AsyncIterator[None]:
+        try:
+            yield None
+        finally:
+            await gateway.close()
+
     server = FastMCP(
         name=resolved_settings.app_name,
         instructions=(
@@ -48,6 +57,8 @@ def create_server(settings: AppSettings | None = None) -> FastMCP:
             "search raw chunks, and ask grounded questions over a selected store."
         ),
         log_level=resolved_settings.log_level,
+        stateless_http=True,
+        lifespan=server_lifespan,
     )
 
     @server.tool(
@@ -65,17 +76,17 @@ def create_server(settings: AppSettings | None = None) -> FastMCP:
         ),
         meta={"ui": {"resourceUri": CONSOLE_RESOURCE_URI}},
     )
-    def open_vector_store_console(
+    async def open_vector_store_console(
         vector_store_id: Annotated[str | None, Field(min_length=1)] = None,
     ) -> CallToolResult:
-        vector_store_list = gateway.list_vector_stores(limit=20)
+        vector_store_list = await gateway.list_vector_stores(limit=20)
         selected_vector_store_id = vector_store_id
         if selected_vector_store_id is None and vector_store_list.vector_stores:
             selected_vector_store_id = vector_store_list.vector_stores[0].id
 
         selected_vector_store_status = None
         if selected_vector_store_id is not None:
-            selected_vector_store_status = gateway.get_vector_store_status(
+            selected_vector_store_status = await gateway.get_vector_store_status(
                 vector_store_id=selected_vector_store_id,
                 file_limit=20,
                 batch_id=None,
@@ -129,13 +140,13 @@ def create_server(settings: AppSettings | None = None) -> FastMCP:
             openWorldHint=True,
         ),
     )
-    def upload_file(
+    async def upload_file(
         local_path: Annotated[str, Field(min_length=1)],
         vector_store_id: Annotated[str | None, Field(min_length=1)] = None,
         purpose: FilePurpose = "assistants",
         attributes: ToolAttributes | None = None,
     ) -> CallToolResult:
-        payload = gateway.upload_file(
+        payload = await gateway.upload_file(
             local_path=local_path,
             vector_store_id=vector_store_id,
             purpose=purpose,
@@ -165,11 +176,11 @@ def create_server(settings: AppSettings | None = None) -> FastMCP:
             openWorldHint=True,
         ),
     )
-    def list_files(
+    async def list_files(
         limit: Annotated[int, Field(ge=1, le=100)] = 20,
         purpose: str | None = None,
     ) -> CallToolResult:
-        payload = gateway.list_files(limit=limit, purpose=purpose)
+        payload = await gateway.list_files(limit=limit, purpose=purpose)
         summary = f"Returned {payload.total_returned} file(s)."
         return _tool_result(summary, payload)
 
@@ -183,12 +194,12 @@ def create_server(settings: AppSettings | None = None) -> FastMCP:
             openWorldHint=True,
         ),
     )
-    def create_vector_store(
+    async def create_vector_store(
         name: Annotated[str | None, Field(min_length=1)] = None,
         description: Annotated[str | None, Field(min_length=1)] = None,
         metadata: VectorStoreMetadata | None = None,
     ) -> CallToolResult:
-        payload = gateway.create_vector_store(
+        payload = await gateway.create_vector_store(
             name=name,
             description=description,
             metadata=metadata,
@@ -207,10 +218,10 @@ def create_server(settings: AppSettings | None = None) -> FastMCP:
             openWorldHint=True,
         ),
     )
-    def list_vector_stores(
+    async def list_vector_stores(
         limit: Annotated[int, Field(ge=1, le=100)] = 20,
     ) -> CallToolResult:
-        payload = gateway.list_vector_stores(limit=limit)
+        payload = await gateway.list_vector_stores(limit=limit)
         summary = f"Returned {payload.total_returned} vector store(s)."
         return _tool_result(summary, payload)
 
@@ -227,13 +238,13 @@ def create_server(settings: AppSettings | None = None) -> FastMCP:
             openWorldHint=True,
         ),
     )
-    def attach_files_to_vector_store(
+    async def attach_files_to_vector_store(
         vector_store_id: Annotated[str, Field(min_length=1)],
         file_ids: list[str] | None = None,
         local_paths: list[str] | None = None,
         attributes: ToolAttributes | None = None,
     ) -> CallToolResult:
-        payload = gateway.attach_files_to_vector_store(
+        payload = await gateway.attach_files_to_vector_store(
             vector_store_id=vector_store_id,
             file_ids=file_ids,
             local_paths=local_paths,
@@ -258,12 +269,12 @@ def create_server(settings: AppSettings | None = None) -> FastMCP:
             openWorldHint=True,
         ),
     )
-    def get_vector_store_status(
+    async def get_vector_store_status(
         vector_store_id: Annotated[str, Field(min_length=1)],
         file_limit: Annotated[int, Field(ge=1, le=100)] = 20,
         batch_id: Annotated[str | None, Field(min_length=1)] = None,
     ) -> CallToolResult:
-        payload = gateway.get_vector_store_status(
+        payload = await gateway.get_vector_store_status(
             vector_store_id=vector_store_id,
             file_limit=file_limit,
             batch_id=batch_id,
@@ -289,7 +300,7 @@ def create_server(settings: AppSettings | None = None) -> FastMCP:
             openWorldHint=True,
         ),
     )
-    def search_vector_store(
+    async def search_vector_store(
         vector_store_id: Annotated[str, Field(min_length=1)],
         query: Annotated[str, Field(min_length=1)],
         max_num_results: Annotated[int | None, Field(ge=1)] = None,
@@ -297,7 +308,7 @@ def create_server(settings: AppSettings | None = None) -> FastMCP:
         file_id: Annotated[str | None, Field(min_length=1)] = None,
         filename: Annotated[str | None, Field(min_length=1)] = None,
     ) -> CallToolResult:
-        payload = gateway.search_vector_store(
+        payload = await gateway.search_vector_store(
             vector_store_id=vector_store_id,
             query=query,
             max_num_results=max_num_results
@@ -358,12 +369,12 @@ def create_server(settings: AppSettings | None = None) -> FastMCP:
         ),
         meta={"ui": {"visibility": ["app"]}},
     )
-    def update_vector_store_file_attributes(
+    async def update_vector_store_file_attributes(
         vector_store_id: Annotated[str, Field(min_length=1)],
         file_id: Annotated[str, Field(min_length=1)],
         attributes: ToolAttributes | None = None,
     ) -> CallToolResult:
-        payload = gateway.update_vector_store_file_attributes(
+        payload = await gateway.update_vector_store_file_attributes(
             vector_store_id=vector_store_id,
             file_id=file_id,
             attributes=attributes,
@@ -384,10 +395,10 @@ def create_server(settings: AppSettings | None = None) -> FastMCP:
             openWorldHint=True,
         ),
     )
-    def delete_file(
+    async def delete_file(
         file_id: Annotated[str, Field(min_length=1)],
     ) -> CallToolResult:
-        payload = gateway.delete_file(file_id=file_id)
+        payload = await gateway.delete_file(file_id=file_id)
         summary = f"Deleted file {file_id}."
         return _tool_result(summary, payload)
 

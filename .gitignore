@@ -21,4 +21,6 @@ host-dist/
 build/
 
 .vscode/*
-!.vscode/mcp.json
+
+# Keep local agent/editor MCP registrations out of the repo.
+.codex/config.toml

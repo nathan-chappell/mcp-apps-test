@@ -3,6 +3,9 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+import uvicorn
+from starlette.middleware.cors import CORSMiddleware
+
 from .logging import configure_logging
 from .server import create_server
 from .settings import get_settings
@@ -22,8 +25,27 @@ def main() -> None:
         server.settings.port,
         server.settings.streamable_http_path,
     )
+    app = CORSMiddleware(
+        app=server.streamable_http_app(),
+        allow_origins=[],
+        allow_origin_regex=r"http://(127\.0\.0\.1|localhost)(:\d+)?",
+        allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+        allow_headers=[
+            "content-type",
+            "authorization",
+            "mcp-session-id",
+            "mcp-protocol-version",
+            "last-event-id",
+        ],
+        expose_headers=["mcp-session-id"],
+    )
     try:
-        server.run(transport="streamable-http")
+        uvicorn.run(
+            app,
+            host=server.settings.host,
+            port=server.settings.port,
+            log_level=server.settings.log_level.lower(),
+        )
     except KeyboardInterrupt:
         logger.info(
             "mcp_server_stopped name=%s transport=streamable-http",
