@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Document Library UI Preview</title>
+    <style>
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        font-family: "Avenir Next", "Segoe UI", sans-serif;
+        background:
+          radial-gradient(circle at top left, rgba(35, 108, 196, 0.18), transparent 28%),
+          radial-gradient(circle at top right, rgba(15, 118, 110, 0.18), transparent 32%),
+          linear-gradient(180deg, #fff8ef 0%, #f3eee5 100%);
+        color: #142126;
+      }
+      main {
+        width: min(680px, calc(100vw - 40px));
+        padding: 32px;
+        border-radius: 28px;
+        background: rgba(255, 255, 255, 0.88);
+        box-shadow: 0 24px 64px rgba(27, 40, 49, 0.12);
+      }
+      h1 {
+        margin-top: 0;
+        font-size: 2.6rem;
+      }
+      p {
+        color: #44555e;
+      }
+      .links {
+        display: flex;
+        gap: 16px;
+        flex-wrap: wrap;
+        margin-top: 24px;
+      }
+      a {
+        padding: 14px 18px;
+        border-radius: 999px;
+        text-decoration: none;
+        background: #0f766e;
+        color: white;
+        font-weight: 700;
+      }
+      a.secondary {
+        background: #142126;
+      }
+      code {
+        background: rgba(20, 33, 38, 0.08);
+        padding: 2px 6px;
+        border-radius: 6px;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <p style="text-transform: uppercase; letter-spacing: 0.14em; font-size: 0.78rem;">
+        MCP App Preview
+      </p>
+      <h1>Document Library UI</h1>
+      <p>
+        Use these standalone mock pages while you work on the MCP app. For a real
+        authenticated flow, open the server through an MCP host and call
+        <code>open_document_library</code> or <code>open_document_ask</code>.
+      </p>
+      <div class="links">
+        <a href="/library.html?mock=1">Open Library Preview</a>
+        <a href="/ask.html?mock=1" class="secondary">Open Ask Preview</a>
+      </div>
+    </main>
+  </body>
+</html>

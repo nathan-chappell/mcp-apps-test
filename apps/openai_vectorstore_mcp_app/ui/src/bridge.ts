@@ -1,59 +1,37 @@
-import type {
-  App,
-  McpUiDisplayMode,
-  McpUiHostContext,
-} from "@modelcontextprotocol/ext-apps";
+import type { App, McpUiHostContext } from "@modelcontextprotocol/ext-apps";
 
 import type {
-  ConfirmKnowledgeBaseCommandArguments,
-  KnowledgeBaseCommandResult,
-  KnowledgeBaseDeskState,
-  KnowledgeBaseInfoArguments,
-  KnowledgeInfoResult,
-  KnowledgeBaseQueryArguments,
-  KnowledgeQueryResult,
-  RunKnowledgeBaseCommandArguments,
+  DocumentLibraryQueryResult,
+  DocumentLibraryStateResult,
+  DocumentUploadFinalizeResult,
+  GetDocumentLibraryStateArguments,
+  QueryDocumentLibraryArguments,
   ToolResultName,
-  UpdateKnowledgeBaseArguments,
-  UpdateKnowledgeBaseResult,
-  UploadFinalizeResult,
+  UpdateDocumentLibraryArguments,
+  UpdateDocumentLibraryResult,
 } from "./types";
 import { getStructuredContent } from "./types";
 
-export interface UploadNodeInput {
+export interface UploadDocumentInput {
   tag_ids: string[];
   file: File;
 }
 
-export interface KnowledgeBaseBridge {
+export interface DocumentLibraryBridge {
   readonly mode: "host" | "mock";
   readonly hostContext?: McpUiHostContext;
-  readonly initial_state: KnowledgeBaseDeskState;
-  readonly initial_query_result: KnowledgeQueryResult;
-  get_knowledge_base_info(
-    args: KnowledgeBaseInfoArguments,
-  ): Promise<KnowledgeInfoResult>;
-  query_knowledge_base(
-    args: KnowledgeBaseQueryArguments,
-  ): Promise<KnowledgeQueryResult>;
-  update_knowledge_base(
-    args: UpdateKnowledgeBaseArguments,
-  ): Promise<UpdateKnowledgeBaseResult>;
-  run_knowledge_base_command(
-    args: RunKnowledgeBaseCommandArguments,
-  ): Promise<KnowledgeBaseCommandResult>;
-  confirm_knowledge_base_command(
-    args: ConfirmKnowledgeBaseCommandArguments,
-  ): Promise<KnowledgeBaseCommandResult>;
-  upload_node(input: UploadNodeInput): Promise<UploadFinalizeResult>;
-}
-
-export interface KnowledgeBaseHostControls {
-  readonly mode: "host" | "mock";
-  readonly supportedDisplayModes: McpUiDisplayMode[];
-  readonly supportsModelContext: boolean;
-  update_model_context(markdown: string): Promise<void>;
-  request_display_mode(mode: McpUiDisplayMode): Promise<McpUiDisplayMode | null>;
+  readonly initial_library_state: DocumentLibraryStateResult | null;
+  readonly initial_query_result: DocumentLibraryQueryResult | null;
+  get_document_library_state(
+    args: GetDocumentLibraryStateArguments,
+  ): Promise<DocumentLibraryStateResult>;
+  query_document_library(
+    args: QueryDocumentLibraryArguments,
+  ): Promise<DocumentLibraryQueryResult>;
+  update_document_library(
+    args: UpdateDocumentLibraryArguments,
+  ): Promise<UpdateDocumentLibraryResult>;
+  upload_document(input: UploadDocumentInput): Promise<DocumentUploadFinalizeResult>;
 }
 
 async function callStructuredTool<T, TArgs extends object = Record<string, unknown>>(
@@ -63,65 +41,49 @@ async function callStructuredTool<T, TArgs extends object = Record<string, unkno
 ): Promise<T> {
   const result = await app.callServerTool({
     name,
-    arguments: args as unknown as Record<string, unknown>,
+    arguments: args as Record<string, unknown>,
   });
   return getStructuredContent<T>(result);
 }
 
-export function createHostBridge(
+export function createLibraryHostBridge(
   app: App,
-  initialQueryResult: KnowledgeQueryResult,
+  initialState: DocumentLibraryStateResult,
   hostContext?: McpUiHostContext,
-): KnowledgeBaseBridge {
+): DocumentLibraryBridge {
   return {
     mode: "host",
     hostContext,
-    initial_state: initialQueryResult.knowledge_base_state,
-    initial_query_result: initialQueryResult,
-    get_knowledge_base_info(args) {
-      return callStructuredTool<KnowledgeInfoResult, KnowledgeBaseInfoArguments>(
-        app,
-        "get_knowledge_base_info",
-        args,
-      );
-    },
-    query_knowledge_base(args) {
-      return callStructuredTool<KnowledgeQueryResult, KnowledgeBaseQueryArguments>(
-        app,
-        "query_knowledge_base",
-        args,
-      );
-    },
-    update_knowledge_base(args) {
+    initial_library_state: initialState,
+    initial_query_result: null,
+    get_document_library_state(args) {
       return callStructuredTool<
-        UpdateKnowledgeBaseResult,
-        UpdateKnowledgeBaseArguments
-      >(app, "update_knowledge_base", args);
+        DocumentLibraryStateResult,
+        GetDocumentLibraryStateArguments
+      >(app, "get_document_library_state", args);
     },
-    run_knowledge_base_command(args) {
+    query_document_library(args) {
       return callStructuredTool<
-        KnowledgeBaseCommandResult,
-        RunKnowledgeBaseCommandArguments
-      >(app, "run_knowledge_base_command", args);
+        DocumentLibraryQueryResult,
+        QueryDocumentLibraryArguments
+      >(app, "query_document_library", args);
     },
-    confirm_knowledge_base_command(args) {
+    update_document_library(args) {
       return callStructuredTool<
-        KnowledgeBaseCommandResult,
-        ConfirmKnowledgeBaseCommandArguments
-      >(app, "confirm_knowledge_base_command", args);
+        UpdateDocumentLibraryResult,
+        UpdateDocumentLibraryArguments
+      >(app, "update_document_library", args);
     },
-    async upload_node(input) {
+    async upload_document(input) {
       const updateResult = await callStructuredTool<
-        UpdateKnowledgeBaseResult,
-        UpdateKnowledgeBaseArguments
-      >(app, "update_knowledge_base", {
+        UpdateDocumentLibraryResult,
+        UpdateDocumentLibraryArguments
+      >(app, "update_document_library", {
         action: "prepare_upload",
       });
       const uploadSession = updateResult.upload_session;
       if (!uploadSession) {
-        throw new Error(
-          "Knowledge-base upload preparation did not return an upload session.",
-        );
+        throw new Error("Document upload preparation did not return an upload session.");
       }
 
       const form = new FormData();
@@ -137,35 +99,65 @@ export function createHostBridge(
       if (!response.ok) {
         throw new Error(await response.text());
       }
-      return (await response.json()) as UploadFinalizeResult;
+      return (await response.json()) as DocumentUploadFinalizeResult;
     },
   };
 }
 
-export function createHostControls(app: App): KnowledgeBaseHostControls {
+export function createAskHostBridge(
+  app: App,
+  initialResult: DocumentLibraryQueryResult,
+  hostContext?: McpUiHostContext,
+): DocumentLibraryBridge {
   return {
     mode: "host",
-    get supportedDisplayModes() {
-      return app.getHostContext()?.availableDisplayModes ?? [];
+    hostContext,
+    initial_library_state: null,
+    initial_query_result: initialResult,
+    get_document_library_state(args) {
+      return callStructuredTool<
+        DocumentLibraryStateResult,
+        GetDocumentLibraryStateArguments
+      >(app, "get_document_library_state", args);
     },
-    get supportsModelContext() {
-      return Boolean(app.getHostCapabilities()?.updateModelContext);
+    query_document_library(args) {
+      return callStructuredTool<
+        DocumentLibraryQueryResult,
+        QueryDocumentLibraryArguments
+      >(app, "query_document_library", args);
     },
-    async update_model_context(markdown) {
-      if (!app.getHostCapabilities()?.updateModelContext) {
-        return;
-      }
-      await app.updateModelContext({
-        content: [{ type: "text", text: markdown }],
+    update_document_library(args) {
+      return callStructuredTool<
+        UpdateDocumentLibraryResult,
+        UpdateDocumentLibraryArguments
+      >(app, "update_document_library", args);
+    },
+    async upload_document(input) {
+      const updateResult = await callStructuredTool<
+        UpdateDocumentLibraryResult,
+        UpdateDocumentLibraryArguments
+      >(app, "update_document_library", {
+        action: "prepare_upload",
       });
-    },
-    async request_display_mode(mode) {
-      const supportedModes = app.getHostContext()?.availableDisplayModes ?? [];
-      if (!supportedModes.includes(mode)) {
-        return null;
+      const uploadSession = updateResult.upload_session;
+      if (!uploadSession) {
+        throw new Error("Document upload preparation did not return an upload session.");
       }
-      const result = await app.requestDisplayMode({ mode });
-      return result.mode;
+
+      const form = new FormData();
+      form.set("upload_token", uploadSession.upload_token);
+      form.set("file", input.file);
+      for (const tagId of input.tag_ids) {
+        form.append("tag_ids", tagId);
+      }
+      const response = await fetch(uploadSession.upload_url, {
+        method: "POST",
+        body: form,
+      });
+      if (!response.ok) {
+        throw new Error(await response.text());
+      }
+      return (await response.json()) as DocumentUploadFinalizeResult;
     },
   };
 }

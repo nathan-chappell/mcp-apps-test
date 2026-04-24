@@ -32,20 +32,19 @@ export interface DerivedArtifactSummary {
   updated_at: string;
 }
 
-export interface KnowledgeEdgeSummary {
-  id: string;
-  from_node_id: string;
-  to_node_id: string;
-  from_node_title: string;
-  to_node_title: string;
-  label: string;
-  created_at: string;
-  updated_at: string;
+export interface DocumentFilters {
+  tag_ids: string[];
+  selected_tag_names: string[];
+  tag_match_mode: "all" | "any";
+  filename_query: string | null;
+  created_from: string | null;
+  created_to: string | null;
+  matching_document_ids: string[];
 }
 
-export interface KnowledgeNodeSummary {
+export interface DocumentSummary {
   id: string;
-  display_title: string;
+  title: string;
   original_filename: string;
   media_type: string;
   source_kind: "document" | "audio" | "image" | "video" | "other";
@@ -58,70 +57,53 @@ export interface KnowledgeNodeSummary {
   derived_kinds: string[];
   openai_original_file_id: string | null;
   download_url: string | null;
-  outgoing_edge_count: number;
-  incoming_edge_count: number;
 }
 
-export interface KnowledgeNodeDetail extends KnowledgeNodeSummary {
+export interface DocumentDetail extends DocumentSummary {
   original_mime_type: string | null;
   derived_artifacts: DerivedArtifactSummary[];
-  outgoing_edges: KnowledgeEdgeSummary[];
-  incoming_edges: KnowledgeEdgeSummary[];
 }
 
-export interface KnowledgeBaseSummary {
+export interface DocumentLibrarySummary {
   id: string;
   title: string;
   description: string | null;
   created_at: string;
   updated_at: string;
-  node_count: number;
+  document_count: number;
+  filtered_document_count: number;
   tag_count: number;
-  edge_count: number;
   vector_store_ready: boolean;
 }
 
-export interface KnowledgeBaseContext {
-  selected_node_id: string | null;
-  graph_selection_mode: "self" | "children" | "descendants";
-  tag_ids: string[];
-  selected_tag_names: string[];
-  tag_match_mode: "all" | "any";
-  media_types: string[];
-  include_web: boolean;
-  rewrite_query: boolean;
-  branch_factor: number;
-  depth: number;
-  max_results: number;
-  visible_node_ids: string[];
-  scoped_node_ids: string[];
-}
-
-export interface KnowledgeBaseState {
-  knowledge_base: KnowledgeBaseSummary;
+export interface DocumentLibraryState {
+  library: DocumentLibrarySummary;
   tags: KnowledgeTagSummary[];
-  nodes: KnowledgeNodeSummary[];
-  edges: KnowledgeEdgeSummary[];
-  context: KnowledgeBaseContext;
+  documents: DocumentSummary[];
+  filters: DocumentFilters;
 }
 
-export interface KnowledgeBaseCapabilities {
+export interface DocumentLibraryCapabilities {
   upload_url: string;
   upload_token_ttl_seconds: number;
-  confirmation_token_ttl_seconds: number;
   supports_video_audio_extraction: boolean;
   accepted_hint: string;
 }
 
-export interface KnowledgeBaseDeskState {
+export interface DocumentLibraryViewState {
   access: KnowledgeAccessState;
-  knowledge_base: KnowledgeBaseState | null;
-  capabilities: KnowledgeBaseCapabilities;
+  library: DocumentLibraryState | null;
+  capabilities: DocumentLibraryCapabilities;
 }
 
-export interface SearchHit {
-  node_id: string;
-  node_title: string;
+export interface DocumentLibraryStateResult {
+  document_library_state: DocumentLibraryViewState;
+  document_detail: DocumentDetail | null;
+}
+
+export interface DocumentSearchHit {
+  document_id: string;
+  document_title: string;
   original_filename: string;
   derived_artifact_id: string | null;
   openai_file_id: string;
@@ -131,141 +113,38 @@ export interface SearchHit {
   score: number;
   text: string;
   tags: string[];
-  attributes: Record<string, string | number | boolean> | null;
 }
 
-export interface FileSearchCallSummary {
-  id: string;
-  status: string;
-  queries: string[];
-  results: SearchHit[];
+export interface DocumentCitation {
+  label: string;
+  document_id: string | null;
+  document_title: string | null;
+  original_filename: string | null;
+  quote: string | null;
+  url: string | null;
+  source: "document_library" | "web";
 }
 
-export interface WebSearchCallSummary {
-  id: string;
-  status: string;
+export interface DocumentSearchResult {
   query: string;
-  sources: string[];
-}
-
-export interface KnowledgeFileSearchResult {
-  knowledge_base_id: string;
-  query: string;
-  context: KnowledgeBaseContext;
-  hits: SearchHit[];
+  hits: DocumentSearchHit[];
   total_hits: number;
 }
 
-export interface BranchSearchNode {
-  id: string;
-  parent_id: string | null;
-  depth: number;
+export interface DocumentAskResult {
   query: string;
-  rationale: string | null;
-  hits: SearchHit[];
-  children: string[];
-}
-
-export interface KnowledgeBranchSearchResult {
-  knowledge_base_id: string;
-  seed_query: string;
-  context: KnowledgeBaseContext;
-  nodes: BranchSearchNode[];
-  merged_hits: SearchHit[];
-}
-
-export interface KnowledgeAnswerCitation {
-  source: "knowledge_base" | "web";
-  label: string;
-  node_id: string | null;
-  node_title: string | null;
-  original_filename: string | null;
-  url: string | null;
-  quote: string | null;
-}
-
-export interface KnowledgeChatResult {
-  knowledge_base_id: string;
-  question: string;
   answer: string;
   model: string;
-  include_web: boolean;
   conversation_id: string;
-  context: KnowledgeBaseContext;
-  search_calls: FileSearchCallSummary[];
-  web_search_calls: WebSearchCallSummary[];
-  citations: KnowledgeAnswerCitation[];
+  citations: DocumentCitation[];
+  hits: DocumentSearchHit[];
 }
 
-export type KnowledgeQueryMode = "qa" | "file_search" | "branch_search";
-export type KnowledgeQueryKind =
-  | "knowledge_base"
-  | "qa"
-  | "file_search"
-  | "branch_search";
-
-export interface KnowledgeBaseQueryArguments {
-  query?: string;
-  mode?: KnowledgeQueryMode;
-  selected_node_id?: string;
-  graph_selection_mode?: "self" | "children" | "descendants";
-  tag_ids?: string[];
-  tag_match_mode?: "all" | "any";
-  media_types?: string[];
-  include_web?: boolean;
-  rewrite_query?: boolean;
-  branch_factor?: number;
-  depth?: number;
-  max_results?: number;
-}
-
-export interface KnowledgeQueryResult {
-  kind: KnowledgeQueryKind;
-  knowledge_base_state: KnowledgeBaseDeskState;
-  file_search_result: KnowledgeFileSearchResult | null;
-  branch_search_result: KnowledgeBranchSearchResult | null;
-  chat_result: KnowledgeChatResult | null;
-}
-
-export interface KnowledgeBaseInfoArguments {
-  selected_node_id?: string;
-  graph_selection_mode?: "self" | "children" | "descendants";
-  tag_ids?: string[];
-  tag_match_mode?: "all" | "any";
-  media_types?: string[];
-  include_web?: boolean;
-  rewrite_query?: boolean;
-  branch_factor?: number;
-  depth?: number;
-  max_results?: number;
-  detail_node_id?: string;
-}
-
-export interface KnowledgeInfoResult {
-  knowledge_base_state: KnowledgeBaseDeskState;
-  node_detail: KnowledgeNodeDetail | null;
-}
-
-export type UpdateKnowledgeBaseAction =
-  | "prepare_upload"
-  | "rename_node"
-  | "create_tag"
-  | "set_node_tags"
-  | "upsert_edge"
-  | "delete_edge"
-  | "delete_node";
-
-export interface UpdateKnowledgeBaseArguments {
-  action: UpdateKnowledgeBaseAction;
-  node_id?: string;
-  edge_id?: string;
-  from_node_id?: string;
-  to_node_id?: string;
-  tag_ids?: string[];
-  title?: string;
-  name?: string;
-  color?: string;
-  label?: string;
+export interface DocumentLibraryQueryResult {
+  mode: "search" | "ask";
+  document_library_state: DocumentLibraryViewState;
+  search_result: DocumentSearchResult | null;
+  ask_result: DocumentAskResult | null;
 }
 
 export interface UploadSessionResult {
@@ -274,100 +153,75 @@ export interface UploadSessionResult {
   expires_at: number;
 }
 
-export interface UpdateKnowledgeBaseResult {
-  action: UpdateKnowledgeBaseAction;
-  knowledge_base_state: KnowledgeBaseDeskState | null;
-  node: KnowledgeNodeSummary | null;
-  edge: KnowledgeEdgeSummary | null;
-  tag: KnowledgeTagSummary | null;
-  deleted_node_id: string | null;
-  deleted_edge_id: string | null;
+export interface DocumentUploadFinalizeResult {
+  document: DocumentSummary;
+}
+
+export interface UpdateDocumentLibraryResult {
+  action: "prepare_upload" | "create_tag" | "set_document_tags";
   upload_session: UploadSessionResult | null;
-}
-
-export interface UploadFinalizeResult {
-  node: KnowledgeNodeSummary;
-}
-
-export interface PendingCommandResult {
-  token: string;
-  prompt: string;
-  summary: string;
-  expires_at: number;
-}
-
-export interface RunKnowledgeBaseCommandArguments {
-  command: string;
-  selected_node_id?: string;
-  graph_selection_mode?: "self" | "children" | "descendants";
-  tag_ids?: string[];
-  tag_match_mode?: "all" | "any";
-  media_types?: string[];
-  include_web?: boolean;
-  rewrite_query?: boolean;
-  branch_factor?: number;
-  depth?: number;
-  max_results?: number;
-}
-
-export interface ConfirmKnowledgeBaseCommandArguments {
-  token: string;
-  selected_node_id?: string;
-  graph_selection_mode?: "self" | "children" | "descendants";
-  tag_ids?: string[];
-  tag_match_mode?: "all" | "any";
-  media_types?: string[];
-  include_web?: boolean;
-  rewrite_query?: boolean;
-  branch_factor?: number;
-  depth?: number;
-  max_results?: number;
-}
-
-export interface KnowledgeBaseCommandResult {
-  status: "executed" | "pending_confirmation" | "rejected";
-  message: string;
-  action: string | null;
-  parser: "agent" | "fallback" | "manual";
-  raw_command: string;
-  knowledge_base_state: KnowledgeBaseDeskState;
-  pending_confirmation: PendingCommandResult | null;
-  node: KnowledgeNodeSummary | null;
-  edge: KnowledgeEdgeSummary | null;
   tag: KnowledgeTagSummary | null;
+  document: DocumentSummary | null;
+}
+
+export interface GetDocumentLibraryStateArguments {
+  tag_ids?: string[];
+  tag_match_mode?: "all" | "any";
+  filename_query?: string;
+  created_from?: string;
+  created_to?: string;
+  detail_document_id?: string;
+}
+
+export interface QueryDocumentLibraryArguments {
+  query: string;
+  mode?: "search" | "ask";
+  tag_ids?: string[];
+  tag_match_mode?: "all" | "any";
+  filename_query?: string;
+  created_from?: string;
+  created_to?: string;
+}
+
+export interface UpdateDocumentLibraryArguments {
+  action: "prepare_upload" | "create_tag" | "set_document_tags";
+  document_id?: string;
+  tag_ids?: string[];
+  name?: string;
+  color?: string;
 }
 
 export type ToolResultName =
-  | "query_knowledge_base"
-  | "get_knowledge_base_info"
-  | "update_knowledge_base"
-  | "run_knowledge_base_command"
-  | "confirm_knowledge_base_command";
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
+  | "get_document_library_state"
+  | "query_document_library"
+  | "update_document_library";
 
 export function getStructuredContent<T>(result: CallToolResult): T {
-  if (!isRecord(result.structuredContent)) {
-    throw new Error("Expected structuredContent in the tool result.");
+  if (!("structuredContent" in result) || result.structuredContent == null) {
+    throw new Error("Tool result did not include structured content.");
   }
   return result.structuredContent as T;
 }
 
-export function isKnowledgeBaseDeskState(
+export function isDocumentLibraryStateResult(
   value: unknown,
-): value is KnowledgeBaseDeskState {
-  return (
-    isRecord(value) &&
-    "access" in value &&
-    "capabilities" in value &&
-    "knowledge_base" in value
-  );
+): value is DocumentLibraryStateResult {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  return "document_library_state" in value && "document_detail" in value;
 }
 
-export function isKnowledgeQueryResult(
+export function isDocumentLibraryQueryResult(
   value: unknown,
-): value is KnowledgeQueryResult {
-  return isRecord(value) && "kind" in value && "knowledge_base_state" in value;
+): value is DocumentLibraryQueryResult {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  return (
+    "document_library_state" in value &&
+    "mode" in value &&
+    "search_result" in value &&
+    "ask_result" in value
+  );
 }

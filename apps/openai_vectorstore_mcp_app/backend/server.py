@@ -2,49 +2,71 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
+from datetime import date
 import json
 import logging
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Annotated, Literal
 
-from mcp.server.auth.settings import AuthSettings
-from mcp.server.fastmcp import FastMCP
-from mcp.types import CallToolResult, TextContent, ToolAnnotations
+from fastmcp import FastMCP
+from fastmcp.server.auth import AuthProvider
+from fastmcp.server.auth.providers.clerk import ClerkProvider
+from fastmcp.tools import ToolResult
+from mcp.types import TextContent, ToolAnnotations
 from pydantic import BaseModel, Field
+from starlette.applications import Starlette
 from starlette.datastructures import UploadFile
 from starlette.requests import Request
 from starlette.responses import JSONResponse, PlainTextResponse, Response
 
-from .auth import ClerkTokenVerifier
+from .auth import RequireActiveClerkUserMiddleware
 from .clerk import ClerkAuthService
 from .db import DatabaseManager
 from .knowledge_base_service import KnowledgeBaseService
 from .logging import configure_logging
 from .openai_gateway import OpenAIKnowledgeBaseGateway
 from .qa_agent import KnowledgeBaseQuestionAnswerer
+from .schemas import (
+    DocumentLibraryQueryResult,
+    DocumentLibraryStateResult,
+    DocumentQueryMode,
+    UpdateDocumentLibraryAction,
+    UpdateDocumentLibraryResult,
+)
 from .settings import AppSettings, get_settings
 from .upload_sessions import KnowledgeBaseSessionService
 
 logger = logging.getLogger(__name__)
 
 RESOURCE_MIME_TYPE = "text/html;profile=mcp-app"
-DESK_RESOURCE_URI = "ui://knowledge-base-desk/index.html"
-DESK_UI_PATH = Path(__file__).resolve().parent.parent / "ui" / "dist" / "mcp-app.html"
-DEV_HOST_INDEX_PATH = (
-    Path(__file__).resolve().parent.parent / "ui" / "host-dist" / "dev-host" / "index.html"
+LIBRARY_RESOURCE_URI = "ui://document-library/index.html"
+ASK_RESOURCE_URI = "ui://document-ask/index.html"
+LIBRARY_UI_PATH = (
+    Path(__file__).resolve().parent.parent / "ui" / "dist" / "library.html"
 )
-DEV_HOST_SANDBOX_PATH = (
-    Path(__file__).resolve().parent.parent
-    / "ui"
-    / "host-dist"
-    / "dev-host"
-    / "sandbox.html"
-)
+ASK_UI_PATH = Path(__file__).resolve().parent.parent / "ui" / "dist" / "ask.html"
 
 
-def create_server(settings: AppSettings | None = None) -> FastMCP:
-    """Create the FastMCP server for the knowledge-base desk."""
+@dataclass(slots=True)
+class ServerResources:
+    database: DatabaseManager
+    clerk_auth: ClerkAuthService
+    gateway: OpenAIKnowledgeBaseGateway
+
+    async def close(self) -> None:
+        await self.gateway.close()
+        await self.clerk_auth.close()
+        await self.database.close()
+
+
+def create_server(
+    settings: AppSettings | None = None,
+    *,
+    auth_provider: AuthProvider | None = None,
+) -> FastMCP:
+    """Create the FastMCP server for the document-library app."""
 
     resolved_settings = settings or get_settings()
     configure_logging(resolved_settings.log_level)
@@ -63,41 +85,31 @@ def create_server(settings: AppSettings | None = None) -> FastMCP:
         question_answerer=question_answerer,
     )
 
-    @asynccontextmanager
-    async def server_lifespan(_: FastMCP[None]) -> AsyncIterator[None]:
-        try:
-            yield None
-        finally:
-            await gateway.close()
-            await clerk_auth.close()
-            await database.close()
-
+    resources = ServerResources(
+        database=database,
+        clerk_auth=clerk_auth,
+        gateway=gateway,
+    )
+    resolved_auth_provider = auth_provider or _create_clerk_auth_provider(resolved_settings)
     server = FastMCP(
         name=resolved_settings.app_name,
         instructions=(
-            "Use query_knowledge_base to open the knowledge-base desk UI or run a grounded "
-            "knowledge-base query. Use get_knowledge_base_info for the current graph state "
-            "and optional node detail. Use update_knowledge_base, run_knowledge_base_command, "
-            "and confirm_knowledge_base_command for app-driven graph mutations, uploads, and "
-            "destructive confirmations."
+            "Use open_document_library to browse and manage the document library UI. "
+            "Use open_document_ask to search the library or ask grounded questions. "
+            "The helper tools get_document_library_state, query_document_library, and "
+            "update_document_library are app-only."
         ),
-        log_level=resolved_settings.log_level,
-        stateless_http=True,
-        lifespan=server_lifespan,
-        auth=AuthSettings(
-            issuer_url=resolved_settings.clerk_issuer_url,
-            resource_server_url=resolved_settings.app_base_url,
-            required_scopes=resolved_settings.mcp_required_scopes,
-        ),
-        token_verifier=ClerkTokenVerifier(clerk_auth),
+        auth=resolved_auth_provider,
+        middleware=[RequireActiveClerkUserMiddleware(clerk_auth)],
     )
+    setattr(server, "_server_resources", resources)
 
     @server.tool(
-        name="query_knowledge_base",
-        title="Query Knowledge Base",
+        name="open_document_library",
+        title="Open Document Library",
         description=(
-            "Open the knowledge-base desk UI and optionally run QA, raw file search, or "
-            "branching search over the current graph and tag scope."
+            "Open the document library UI for tag filtering, filename/date filtering, "
+            "metadata review, uploads, and tag management."
         ),
         annotations=ToolAnnotations(
             readOnlyHint=True,
@@ -105,96 +117,153 @@ def create_server(settings: AppSettings | None = None) -> FastMCP:
             idempotentHint=True,
             openWorldHint=True,
         ),
-        meta={"ui": {"resourceUri": DESK_RESOURCE_URI}},
+        meta={"ui": {"resourceUri": LIBRARY_RESOURCE_URI}},
     )
-    async def query_knowledge_base(
-        query: Annotated[str | None, Field(min_length=1)] = None,
-        mode: Literal["qa", "file_search", "branch_search"] = "qa",
-        selected_node_id: Annotated[str | None, Field(min_length=1)] = None,
-        graph_selection_mode: Literal["self", "children", "descendants"] = "self",
+    async def open_document_library(
         tag_ids: list[str] | None = None,
         tag_match_mode: Literal["all", "any"] = "all",
-        media_types: list[str] | None = None,
-        include_web: bool = False,
-        rewrite_query: bool = True,
-        branch_factor: Annotated[int, Field(ge=1, le=6)] = 3,
-        depth: Annotated[int, Field(ge=1, le=4)] = 2,
-        max_results: Annotated[int, Field(ge=1, le=20)] = 8,
-    ) -> CallToolResult:
-        payload = await knowledge_base_service.query_knowledge_base(
-            selected_node_id=selected_node_id,
-            graph_selection_mode=graph_selection_mode,
+        filename_query: Annotated[str | None, Field(min_length=1)] = None,
+        created_from: date | None = None,
+        created_to: date | None = None,
+        detail_document_id: Annotated[str | None, Field(min_length=1)] = None,
+    ) -> ToolResult:
+        payload = await knowledge_base_service.get_document_library_state(
             tag_ids=tag_ids or [],
             tag_match_mode=tag_match_mode,
-            media_types=media_types or [],
-            include_web=include_web,
-            rewrite_query=rewrite_query,
-            branch_factor=branch_factor,
-            depth=depth,
-            max_results=max_results,
+            filename_query=filename_query,
+            created_from=created_from,
+            created_to=created_to,
+            detail_document_id=detail_document_id,
+        )
+        return _tool_result(
+            "Opened the document library.",
+            payload,
+            meta={"ui": {"resourceUri": LIBRARY_RESOURCE_URI}},
+        )
+
+    @server.tool(
+        name="open_document_ask",
+        title="Open Document Ask",
+        description=(
+            "Open the ask UI to search the filtered library or ask grounded questions "
+            "against matching documents."
+        ),
+        annotations=ToolAnnotations(
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=True,
+        ),
+        meta={"ui": {"resourceUri": ASK_RESOURCE_URI}},
+    )
+    async def open_document_ask(
+        query: Annotated[str | None, Field(min_length=1)] = None,
+        mode: DocumentQueryMode = "search",
+        tag_ids: list[str] | None = None,
+        tag_match_mode: Literal["all", "any"] = "all",
+        filename_query: Annotated[str | None, Field(min_length=1)] = None,
+        created_from: date | None = None,
+        created_to: date | None = None,
+    ) -> ToolResult:
+        payload: DocumentLibraryQueryResult
+        if query is None or not query.strip():
+            state_payload = await knowledge_base_service.get_document_library_state(
+                tag_ids=tag_ids or [],
+                tag_match_mode=tag_match_mode,
+                filename_query=filename_query,
+                created_from=created_from,
+                created_to=created_to,
+                detail_document_id=None,
+            )
+            payload = DocumentLibraryQueryResult(
+                mode=mode,
+                document_library_state=state_payload.document_library_state,
+            )
+        else:
+            payload = await knowledge_base_service.query_document_library(
+                query=query,
+                mode=mode,
+                tag_ids=tag_ids or [],
+                tag_match_mode=tag_match_mode,
+                filename_query=filename_query,
+                created_from=created_from,
+                created_to=created_to,
+            )
+        return _tool_result(
+            "Opened document search and ask.",
+            payload,
+            meta={"ui": {"resourceUri": ASK_RESOURCE_URI}},
+        )
+
+    @server.tool(
+        name="get_document_library_state",
+        title="Get Document Library State",
+        description="Return the current filtered library state and optional document detail.",
+        annotations=ToolAnnotations(
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=True,
+        ),
+        meta={"ui": {"visibility": ["app"]}},
+    )
+    async def get_document_library_state(
+        tag_ids: list[str] | None = None,
+        tag_match_mode: Literal["all", "any"] = "all",
+        filename_query: Annotated[str | None, Field(min_length=1)] = None,
+        created_from: date | None = None,
+        created_to: date | None = None,
+        detail_document_id: Annotated[str | None, Field(min_length=1)] = None,
+    ) -> DocumentLibraryStateResult:
+        return await knowledge_base_service.get_document_library_state(
+            tag_ids=tag_ids or [],
+            tag_match_mode=tag_match_mode,
+            filename_query=filename_query,
+            created_from=created_from,
+            created_to=created_to,
+            detail_document_id=detail_document_id,
+        )
+
+    @server.tool(
+        name="query_document_library",
+        title="Query Document Library",
+        description=(
+            "Run filtered search or grounded QA against the document library. "
+            "This is intended for app-driven refreshes."
+        ),
+        annotations=ToolAnnotations(
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=True,
+        ),
+        meta={"ui": {"visibility": ["app"]}},
+    )
+    async def query_document_library(
+        query: Annotated[str, Field(min_length=1)],
+        mode: DocumentQueryMode = "search",
+        tag_ids: list[str] | None = None,
+        tag_match_mode: Literal["all", "any"] = "all",
+        filename_query: Annotated[str | None, Field(min_length=1)] = None,
+        created_from: date | None = None,
+        created_to: date | None = None,
+    ) -> DocumentLibraryQueryResult:
+        return await knowledge_base_service.query_document_library(
             query=query,
             mode=mode,
-        )
-        summary = {
-            "knowledge_base": "Opened the knowledge-base desk.",
-            "qa": "Answered a knowledge-base question.",
-            "file_search": "Ran knowledge-base file search.",
-            "branch_search": "Ran knowledge-base branching search.",
-        }[payload.kind]
-        return _tool_result(
-            summary,
-            payload,
-            meta={"ui": {"resourceUri": DESK_RESOURCE_URI}},
-        )
-
-    @server.tool(
-        name="get_knowledge_base_info",
-        title="Get Knowledge Base Info",
-        description=(
-            "Return the current knowledge-base graph state and optionally the full detail for "
-            "one node."
-        ),
-        annotations=ToolAnnotations(
-            readOnlyHint=True,
-            destructiveHint=False,
-            idempotentHint=True,
-            openWorldHint=True,
-        ),
-    )
-    async def get_knowledge_base_info(
-        selected_node_id: Annotated[str | None, Field(min_length=1)] = None,
-        graph_selection_mode: Literal["self", "children", "descendants"] = "self",
-        tag_ids: list[str] | None = None,
-        tag_match_mode: Literal["all", "any"] = "all",
-        media_types: list[str] | None = None,
-        include_web: bool = False,
-        rewrite_query: bool = True,
-        branch_factor: Annotated[int, Field(ge=1, le=6)] = 3,
-        depth: Annotated[int, Field(ge=1, le=4)] = 2,
-        max_results: Annotated[int, Field(ge=1, le=20)] = 8,
-        detail_node_id: Annotated[str | None, Field(min_length=1)] = None,
-    ) -> CallToolResult:
-        payload = await knowledge_base_service.get_knowledge_base_info(
-            selected_node_id=selected_node_id,
-            graph_selection_mode=graph_selection_mode,
             tag_ids=tag_ids or [],
             tag_match_mode=tag_match_mode,
-            media_types=media_types or [],
-            include_web=include_web,
-            rewrite_query=rewrite_query,
-            branch_factor=branch_factor,
-            depth=depth,
-            max_results=max_results,
-            detail_node_id=detail_node_id,
+            filename_query=filename_query,
+            created_from=created_from,
+            created_to=created_to,
         )
-        return _tool_result("Loaded knowledge-base info.", payload)
 
     @server.tool(
-        name="update_knowledge_base",
-        title="Update Knowledge Base",
+        name="update_document_library",
+        title="Update Document Library",
         description=(
-            "Run app-driven typed graph mutations such as upload preparation, node rename, "
-            "tag changes, and low-level edge updates."
+            "Prepare uploads, create tags, or update the tags on a document. "
+            "This tool is app-only."
         ),
         annotations=ToolAnnotations(
             destructiveHint=True,
@@ -203,162 +272,48 @@ def create_server(settings: AppSettings | None = None) -> FastMCP:
         ),
         meta={"ui": {"visibility": ["app"]}},
     )
-    async def update_knowledge_base(
-        action: Literal[
-            "prepare_upload",
-            "rename_node",
-            "create_tag",
-            "set_node_tags",
-            "upsert_edge",
-            "delete_edge",
-            "delete_node",
-        ],
-        node_id: Annotated[str | None, Field(min_length=1)] = None,
-        edge_id: Annotated[str | None, Field(min_length=1)] = None,
-        from_node_id: Annotated[str | None, Field(min_length=1)] = None,
-        to_node_id: Annotated[str | None, Field(min_length=1)] = None,
+    async def update_document_library(
+        action: UpdateDocumentLibraryAction,
+        document_id: Annotated[str | None, Field(min_length=1)] = None,
         tag_ids: list[str] | None = None,
-        title: Annotated[str | None, Field(min_length=1)] = None,
         name: Annotated[str | None, Field(min_length=1)] = None,
         color: Annotated[str | None, Field(min_length=1)] = None,
-        label: Annotated[str | None, Field(min_length=1)] = None,
-    ) -> CallToolResult:
-        payload = await knowledge_base_service.update_knowledge_base(
+    ) -> UpdateDocumentLibraryResult:
+        return await knowledge_base_service.update_document_library(
             action=action,
-            node_id=node_id,
-            edge_id=edge_id,
-            from_node_id=from_node_id,
-            to_node_id=to_node_id,
+            document_id=document_id,
             tag_ids=tag_ids or [],
-            title=title,
             name=name,
             color=color,
-            label=label,
         )
-        return _tool_result(f"Completed knowledge-base action {action}.", payload)
-
-    @server.tool(
-        name="run_knowledge_base_command",
-        title="Run Knowledge Base Command",
-        description=(
-            "Interpret a natural-language command for one graph mutation such as renaming a "
-            "node, creating a tag, connecting nodes, or requesting deletion."
-        ),
-        annotations=ToolAnnotations(
-            destructiveHint=True,
-            idempotentHint=False,
-            openWorldHint=True,
-        ),
-        meta={"ui": {"visibility": ["app"]}},
-    )
-    async def run_knowledge_base_command(
-        command: Annotated[str, Field(min_length=1)],
-        selected_node_id: Annotated[str | None, Field(min_length=1)] = None,
-        graph_selection_mode: Literal["self", "children", "descendants"] = "self",
-        tag_ids: list[str] | None = None,
-        tag_match_mode: Literal["all", "any"] = "all",
-        media_types: list[str] | None = None,
-        include_web: bool = False,
-        rewrite_query: bool = True,
-        branch_factor: Annotated[int, Field(ge=1, le=6)] = 3,
-        depth: Annotated[int, Field(ge=1, le=4)] = 2,
-        max_results: Annotated[int, Field(ge=1, le=20)] = 8,
-    ) -> CallToolResult:
-        payload = await knowledge_base_service.run_command(
-            raw_command=command,
-            selected_node_id=selected_node_id,
-            graph_selection_mode=graph_selection_mode,
-            tag_ids=tag_ids or [],
-            tag_match_mode=tag_match_mode,
-            media_types=media_types or [],
-            include_web=include_web,
-            rewrite_query=rewrite_query,
-            branch_factor=branch_factor,
-            depth=depth,
-            max_results=max_results,
-        )
-        return _tool_result("Processed the knowledge-base command.", payload)
-
-    @server.tool(
-        name="confirm_knowledge_base_command",
-        title="Confirm Knowledge Base Command",
-        description="Confirm a pending destructive knowledge-base command token.",
-        annotations=ToolAnnotations(
-            destructiveHint=True,
-            idempotentHint=False,
-            openWorldHint=True,
-        ),
-        meta={"ui": {"visibility": ["app"]}},
-    )
-    async def confirm_knowledge_base_command(
-        token: Annotated[str, Field(min_length=1)],
-        selected_node_id: Annotated[str | None, Field(min_length=1)] = None,
-        graph_selection_mode: Literal["self", "children", "descendants"] = "self",
-        tag_ids: list[str] | None = None,
-        tag_match_mode: Literal["all", "any"] = "all",
-        media_types: list[str] | None = None,
-        include_web: bool = False,
-        rewrite_query: bool = True,
-        branch_factor: Annotated[int, Field(ge=1, le=6)] = 3,
-        depth: Annotated[int, Field(ge=1, le=4)] = 2,
-        max_results: Annotated[int, Field(ge=1, le=20)] = 8,
-    ) -> CallToolResult:
-        payload = await knowledge_base_service.confirm_command(
-            token=token,
-            selected_node_id=selected_node_id,
-            graph_selection_mode=graph_selection_mode,
-            tag_ids=tag_ids or [],
-            tag_match_mode=tag_match_mode,
-            media_types=media_types or [],
-            include_web=include_web,
-            rewrite_query=rewrite_query,
-            branch_factor=branch_factor,
-            depth=depth,
-            max_results=max_results,
-        )
-        return _tool_result("Confirmed the knowledge-base command.", payload)
 
     @server.resource(
-        DESK_RESOURCE_URI,
-        name="knowledge_base_desk_resource",
-        title="Knowledge Base Desk",
-        description=(
-            "Single-file React UI for graph navigation, uploads, filtering, search, branching "
-            "search, and agent-driven graph mutations."
-        ),
+        LIBRARY_RESOURCE_URI,
+        name="document_library_resource",
+        title="Document Library",
+        description="Single-file React UI for browsing documents, tags, and upload flows.",
         mime_type=RESOURCE_MIME_TYPE,
     )
-    def knowledge_base_desk_resource() -> str:
-        if not DESK_UI_PATH.is_file():
-            logger.warning(
-                "mcp_app_resource_missing uri=%s path=%s",
-                DESK_RESOURCE_URI,
-                DESK_UI_PATH,
-            )
-            return """<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Knowledge Base Desk Build Required</title>
-</head>
-<body>
-  <main style="font-family: sans-serif; padding: 24px;">
-    <h1>Knowledge Base Desk UI not built yet</h1>
-    <p>Run <code>npm install</code> and <code>npm run build:watch</code> in <code>apps/openai_vectorstore_mcp_app/ui</code>, then reopen the tool.</p>
-  </main>
-</body>
-</html>
-"""
-
-        html = DESK_UI_PATH.read_text(encoding="utf-8")
-        logger.info(
-            "mcp_app_resource_ready uri=%s bytes=%s path=%s",
-            DESK_RESOURCE_URI,
-            len(html),
-            DESK_UI_PATH,
+    def document_library_resource() -> str:
+        return _load_ui_html(
+            path=LIBRARY_UI_PATH,
+            resource_uri=LIBRARY_RESOURCE_URI,
+            title="Document Library Build Required",
         )
-        return html
+
+    @server.resource(
+        ASK_RESOURCE_URI,
+        name="document_ask_resource",
+        title="Document Ask",
+        description="Single-file React UI for filtered search and grounded QA.",
+        mime_type=RESOURCE_MIME_TYPE,
+    )
+    def document_ask_resource() -> str:
+        return _load_ui_html(
+            path=ASK_UI_PATH,
+            resource_uri=ASK_RESOURCE_URI,
+            title="Document Ask Build Required",
+        )
 
     @server.custom_route("/api/uploads", methods=["POST"])
     async def upload_route(request: Request) -> Response:
@@ -396,14 +351,14 @@ def create_server(settings: AppSettings | None = None) -> FastMCP:
 
         return JSONResponse(payload.model_dump(mode="json"))
 
-    @server.custom_route("/api/nodes/{node_id}/content", methods=["GET"])
-    async def node_download_route(request: Request) -> Response:
+    @server.custom_route("/api/documents/{document_id}/content", methods=["GET"])
+    async def document_download_route(request: Request) -> Response:
         token = request.query_params.get("token")
-        node_id = request.path_params["node_id"]
+        document_id = request.path_params["document_id"]
         if token is None:
             return PlainTextResponse("Missing token.", status_code=400)
         claims = session_tokens.verify_node_download(token)
-        if claims is None or claims.node_id != node_id:
+        if claims is None or claims.node_id != document_id:
             return PlainTextResponse("Invalid download token.", status_code=403)
         detail, payload = await knowledge_base_service.download_node_bytes(claims=claims)
         headers = {
@@ -415,82 +370,121 @@ def create_server(settings: AppSettings | None = None) -> FastMCP:
             headers=headers,
         )
 
-    @server.custom_route("/api/dev-auth-config", methods=["GET"])
-    async def dev_auth_config_route(_request: Request) -> Response:
-        return JSONResponse(
-            {
-                "clerk_publishable_key": resolved_settings.clerk_publishable_key,
-                "app_name": resolved_settings.app_name,
-            }
-        )
-
     @server.custom_route("/", methods=["GET"])
-    async def dev_host_root_route(_request: Request) -> Response:
-        html = _load_dev_host_html(
-            DEV_HOST_INDEX_PATH,
-            label="dev_host_index",
-            title="Knowledge Base Dev Host Build Required",
-        )
+    async def info_route(_request: Request) -> Response:
         return Response(
-            html,
+            _root_info_page(resolved_settings),
             media_type="text/html",
-            headers=_build_dev_host_headers(),
-        )
-
-    @server.custom_route("/index.html", methods=["GET"])
-    async def dev_host_index_html_route(_request: Request) -> Response:
-        html = _load_dev_host_html(
-            DEV_HOST_INDEX_PATH,
-            label="dev_host_index",
-            title="Knowledge Base Dev Host Build Required",
-        )
-        return Response(
-            html,
-            media_type="text/html",
-            headers=_build_dev_host_headers(),
-        )
-
-    @server.custom_route("/sandbox", methods=["GET"])
-    async def dev_host_sandbox_route(request: Request) -> Response:
-        csp_header: str | None = None
-        raw_csp = request.query_params.get("csp")
-        if raw_csp is not None:
-            try:
-                parsed_csp = json.loads(raw_csp)
-            except json.JSONDecodeError:
-                logger.warning("dev_host_sandbox_invalid_csp_json")
-            else:
-                if isinstance(parsed_csp, dict):
-                    csp_header = _build_dev_host_sandbox_csp(parsed_csp)
-                else:
-                    logger.warning(
-                        "dev_host_sandbox_invalid_csp_payload payload_type=%s",
-                        type(parsed_csp).__name__,
-                    )
-
-        html = _load_dev_host_html(
-            DEV_HOST_SANDBOX_PATH,
-            label="dev_host_sandbox",
-            title="Knowledge Base Sandbox Build Required",
-        )
-        return Response(
-            html,
-            media_type="text/html",
-            headers=_build_dev_host_headers(content_security_policy=csp_header),
+            headers={
+                "cache-control": "no-cache, no-store, must-revalidate",
+                "pragma": "no-cache",
+                "expires": "0",
+            },
         )
 
     logger.info(
         "mcp_server_ready name=%s tools=%s",
         resolved_settings.app_name,
         [
-            "query_knowledge_base",
-            "get_knowledge_base_info",
-            "update_knowledge_base",
-            "run_knowledge_base_command",
-            "confirm_knowledge_base_command",
+            "open_document_library",
+            "open_document_ask",
+            "get_document_library_state",
+            "query_document_library",
+            "update_document_library",
         ],
     )
     return server
+
+
+def create_http_app(server: FastMCP) -> Starlette:
+    app = server.http_app(
+        path="/mcp",
+        transport="streamable-http",
+        stateless_http=True,
+    )
+    original_lifespan_context = app.router.lifespan_context
+    resources = _get_server_resources(server)
+
+    @asynccontextmanager
+    async def combined_lifespan(starlette_app: Starlette) -> AsyncIterator[None]:
+        try:
+            async with original_lifespan_context(starlette_app):
+                yield
+        finally:
+            await resources.close()
+
+    app.router.lifespan_context = combined_lifespan
+    return app
+
+
+def _create_clerk_auth_provider(settings: AppSettings) -> AuthProvider:
+    return ClerkProvider(
+        domain=settings.clerk_domain,
+        client_id=settings.clerk_oauth_client_id,
+        client_secret=settings.clerk_oauth_client_secret.get_secret_value(),
+        base_url=settings.normalized_app_base_url,
+        resource_base_url=settings.normalized_app_base_url,
+        issuer_url=settings.normalized_app_base_url,
+        required_scopes=settings.mcp_required_scopes,
+        require_authorization_consent="external",
+    )
+
+
+def _load_ui_html(*, path: Path, resource_uri: str, title: str) -> str:
+    if not path.is_file():
+        logger.warning(
+            "mcp_app_resource_missing uri=%s path=%s",
+            resource_uri,
+            path,
+        )
+        return _build_required_page(title=title)
+
+    html = path.read_text(encoding="utf-8")
+    logger.info(
+        "mcp_app_resource_ready uri=%s bytes=%s path=%s",
+        resource_uri,
+        len(html),
+        path,
+    )
+    return html
+
+
+def _build_required_page(*, title: str) -> str:
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{title}</title>
+</head>
+<body>
+  <main style="font-family: sans-serif; padding: 24px;">
+    <h1>{title}</h1>
+    <p>Run <code>npm install</code> and <code>npm run build:watch</code> in <code>apps/openai_vectorstore_mcp_app/ui</code>, then reopen the tool.</p>
+  </main>
+</body>
+</html>
+"""
+
+
+def _root_info_page(settings: AppSettings) -> str:
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{settings.app_name}</title>
+</head>
+<body style="font-family: sans-serif; padding: 32px; line-height: 1.5;">
+  <main style="max-width: 760px;">
+    <h1>Document Library MCP Server</h1>
+    <p>This server is intended to be used through a real MCP host or the MCP Inspector.</p>
+    <p>Connect your host to <code>{settings.normalized_app_base_url}/mcp</code>. Unauthenticated MCP requests will return a standards-compliant <code>401</code> with protected-resource metadata so the client can discover Clerk OAuth.</p>
+    <p>For local frontend preview work, use <code>npm run dev:mock</code> in <code>apps/openai_vectorstore_mcp_app/ui</code>.</p>
+  </main>
+</body>
+</html>
+"""
 
 
 def _parse_tag_ids(form) -> list[str]:
@@ -511,88 +505,21 @@ def _parse_tag_ids(form) -> list[str]:
     return [value.strip() for value in raw_values if value.strip()]
 
 
-def _load_dev_host_html(path: Path, *, label: str, title: str) -> str:
-    if not path.is_file():
-        logger.warning("dev_host_asset_missing label=%s path=%s", label, path)
-        return _render_dev_host_build_required_page(title=title, missing_path=path)
-
-    html = path.read_text(encoding="utf-8")
-    logger.info("dev_host_asset_ready label=%s bytes=%s path=%s", label, len(html), path)
-    return html
-
-
-def _render_dev_host_build_required_page(*, title: str, missing_path: Path) -> str:
-    return f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>{title}</title>
-</head>
-<body>
-  <main style="font-family: sans-serif; padding: 24px;">
-    <h1>{title}</h1>
-    <p>The backend could not find the built dev-host asset at <code>{missing_path}</code>.</p>
-    <p>Run <code>npm install</code> and <code>npm run build:watch</code> in <code>apps/openai_vectorstore_mcp_app/ui</code>, then reload this page.</p>
-  </main>
-</body>
-</html>
-"""
-
-
-def _build_dev_host_headers(
-    *, content_security_policy: str | None = None
-) -> dict[str, str]:
-    headers = {
-        "cache-control": "no-cache, no-store, must-revalidate",
-        "pragma": "no-cache",
-        "expires": "0",
-    }
-    if content_security_policy is not None:
-        headers["content-security-policy"] = content_security_policy
-    return headers
-
-
-def _build_dev_host_sandbox_csp(csp: dict[str, object]) -> str:
-    resource_domains = " ".join(_sanitize_csp_domains(csp.get("resourceDomains")))
-    connect_domains = " ".join(_sanitize_csp_domains(csp.get("connectDomains")))
-    frame_domains = " ".join(_sanitize_csp_domains(csp.get("frameDomains")))
-    base_uri_domains = " ".join(_sanitize_csp_domains(csp.get("baseUriDomains")))
-
-    directives = [
-        "default-src 'self' 'unsafe-inline'",
-        f"script-src 'self' 'unsafe-inline' 'unsafe-eval' blob: data: {resource_domains}".strip(),
-        f"style-src 'self' 'unsafe-inline' blob: data: {resource_domains}".strip(),
-        f"img-src 'self' data: blob: {resource_domains}".strip(),
-        f"font-src 'self' data: blob: {resource_domains}".strip(),
-        f"media-src 'self' data: blob: {resource_domains}".strip(),
-        f"connect-src 'self' {connect_domains}".strip(),
-        f"worker-src 'self' blob: {resource_domains}".strip(),
-        f"frame-src {frame_domains}" if frame_domains else "frame-src 'none'",
-        "object-src 'none'",
-        f"base-uri {base_uri_domains}" if base_uri_domains else "base-uri 'none'",
-    ]
-    return "; ".join(directives)
-
-
-def _sanitize_csp_domains(raw_value: object) -> list[str]:
-    if not isinstance(raw_value, list):
-        return []
-    return [
-        value
-        for value in raw_value
-        if isinstance(value, str) and not any(char in value for char in ";\r\n'\" ")
-    ]
-
-
 def _tool_result(
     summary: str,
     payload: BaseModel,
     *,
     meta: dict[str, object] | None = None,
-) -> CallToolResult:
-    return CallToolResult(
-        _meta=meta,
+) -> ToolResult:
+    return ToolResult(
         content=[TextContent(type="text", text=summary)],
-        structuredContent=payload.model_dump(mode="json"),
+        structured_content=payload.model_dump(mode="json"),
+        meta=meta,
     )
+
+
+def _get_server_resources(server: FastMCP) -> ServerResources:
+    resources = getattr(server, "_server_resources", None)
+    if not isinstance(resources, ServerResources):
+        raise RuntimeError("FastMCP server was missing its resource bundle.")
+    return resources

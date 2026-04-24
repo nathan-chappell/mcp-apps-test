@@ -75,7 +75,7 @@ class KnowledgeBaseSessionService:
             }
         )
         return (
-            f"{self._settings.normalized_app_base_url}/api/nodes/{node_id}/content"
+            f"{self._settings.normalized_app_base_url}/api/documents/{node_id}/content"
             f"?token={token}"
         )
 

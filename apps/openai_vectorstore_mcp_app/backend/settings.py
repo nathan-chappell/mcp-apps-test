@@ -2,27 +2,27 @@ from __future__ import annotations
 
 from functools import lru_cache
 from typing import Annotated, Literal
+from urllib.parse import urlsplit
 
 from pydantic import AnyHttpUrl, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 class AppSettings(BaseSettings):
-    """Runtime settings for the workspace desk MCP server."""
+    """Runtime settings for the document-library MCP server."""
 
     openai_api_key: SecretStr = Field(init=False)
     clerk_secret_key: SecretStr = Field(init=False)
+    clerk_oauth_client_id: str = Field(init=False)
+    clerk_oauth_client_secret: SecretStr = Field(init=False)
     app_signing_secret: SecretStr = Field(init=False)
     clerk_issuer_url: AnyHttpUrl = Field(init=False)
 
     app_base_url: AnyHttpUrl = "http://localhost:8000"
-    clerk_publishable_key: str | None = None
     clerk_active_metadata_key: str = "active"
     clerk_role_metadata_key: str = "role"
     database_url: str = "sqlite+aiosqlite:///./.local/openai-vectorstore-mcp-app.db"
-    mcp_required_scopes: Annotated[list[str], NoDecode] = Field(
-        default_factory=lambda: ["user"]
-    )
+    mcp_required_scopes: Annotated[list[str], NoDecode] = Field(default_factory=list)
 
     openai_agent_model: str = "gpt-5.4"
     openai_branching_model: str = "gpt-5.4-mini"
@@ -36,7 +36,7 @@ class AppSettings(BaseSettings):
     command_confirmation_max_age_seconds: int = 900
 
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
-    app_name: str = "openai-knowledge-base-desk"
+    app_name: str = "openai-document-library"
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -48,7 +48,7 @@ class AppSettings(BaseSettings):
     @classmethod
     def _parse_required_scopes(cls, raw_value: object) -> list[str]:
         if raw_value is None:
-            return ["user"]
+            return []
         if isinstance(raw_value, list):
             return [str(item).strip() for item in raw_value if str(item).strip()]
         if isinstance(raw_value, str):
@@ -59,6 +59,17 @@ class AppSettings(BaseSettings):
     @property
     def normalized_app_base_url(self) -> str:
         return str(self.app_base_url).rstrip("/")
+
+    @property
+    def normalized_mcp_resource_server_url(self) -> str:
+        return f"{self.normalized_app_base_url}/mcp"
+
+    @property
+    def clerk_domain(self) -> str:
+        domain = urlsplit(str(self.clerk_issuer_url)).netloc
+        if not domain:
+            raise ValueError("CLERK_ISSUER_URL must include a hostname.")
+        return domain
 
     @property
     def normalized_database_url(self) -> str:

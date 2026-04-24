@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import uvicorn
-from starlette.middleware.cors import CORSMiddleware
 
 from .logging import configure_logging
-from .server import create_server
+from .server import create_http_app, create_server
 from .settings import get_settings
 
 
@@ -15,36 +15,27 @@ def main() -> None:
     settings = get_settings()
     configure_logging(settings.log_level)
 
+    parsed_base_url = urlsplit(settings.normalized_app_base_url)
+    host = parsed_base_url.hostname or "127.0.0.1"
+    port = parsed_base_url.port or 8000
+
     server = create_server(settings)
     logger = logging.getLogger(__name__)
     logger.info(
         "mcp_server_starting name=%s transport=streamable-http cwd=%s host=%s port=%s path=%s",
         settings.app_name,
         Path.cwd(),
-        server.settings.host,
-        server.settings.port,
-        server.settings.streamable_http_path,
+        host,
+        port,
+        "/mcp",
     )
-    app = CORSMiddleware(
-        app=server.streamable_http_app(),
-        allow_origins=[],
-        allow_origin_regex=r"http://localhost(:\d+)?",
-        allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
-        allow_headers=[
-            "content-type",
-            "authorization",
-            "mcp-session-id",
-            "mcp-protocol-version",
-            "last-event-id",
-        ],
-        expose_headers=["mcp-session-id"],
-    )
+
     try:
         uvicorn.run(
-            app,
-            host=server.settings.host,
-            port=server.settings.port,
-            log_level=server.settings.log_level.lower(),
+            create_http_app(server),
+            host=host,
+            port=port,
+            log_level=settings.log_level.lower(),
         )
     except KeyboardInterrupt:
         logger.info(

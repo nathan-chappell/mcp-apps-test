@@ -31,7 +31,6 @@ from .schemas import (
     UpdateAssetTagsResult,
     UpdateWorkspaceResult,
     UploadFinalizeResult,
-    UploadSessionResult,
     UserSummary,
     WorkspaceAssetDetail,
     WorkspaceAssetSummary,

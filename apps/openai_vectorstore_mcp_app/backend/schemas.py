@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Literal, TypeAlias
 
 from openai.types.responses import ResponseFileSearchToolCall, ResponseFunctionWebSearch
@@ -28,6 +28,12 @@ GraphSelectionMode: TypeAlias = Literal["self", "children", "descendants"]
 TagMatchMode: TypeAlias = Literal["all", "any"]
 KnowledgeCommandStatus: TypeAlias = Literal["executed", "pending_confirmation", "rejected"]
 CommandParserKind: TypeAlias = Literal["agent", "fallback", "manual"]
+DocumentQueryMode: TypeAlias = Literal["search", "ask"]
+UpdateDocumentLibraryAction: TypeAlias = Literal[
+    "prepare_upload",
+    "create_tag",
+    "set_document_tags",
+]
 
 
 def _read_text_from_search_result(search_result: VectorStoreSearchResponse) -> str:
@@ -406,3 +412,129 @@ class ImageDescriptionPayload(BaseModel):
     detailed_description: str
     visible_text: list[str] = Field(default_factory=list)
     keywords: list[str] = Field(default_factory=list)
+
+
+class DocumentSearchHit(BaseModel):
+    document_id: str
+    document_title: str
+    original_filename: str
+    derived_artifact_id: str | None = None
+    openai_file_id: str
+    original_openai_file_id: str | None = None
+    media_type: str
+    source_kind: str
+    score: float
+    text: str
+    tags: list[str] = Field(default_factory=list)
+
+
+class DocumentCitation(BaseModel):
+    label: str
+    document_id: str | None = None
+    document_title: str | None = None
+    original_filename: str | None = None
+    quote: str | None = None
+    url: str | None = None
+    source: Literal["document_library", "web"] = "document_library"
+
+
+class DocumentFilters(BaseModel):
+    tag_ids: list[str] = Field(default_factory=list)
+    selected_tag_names: list[str] = Field(default_factory=list)
+    tag_match_mode: TagMatchMode = "all"
+    filename_query: str | None = None
+    created_from: date | None = None
+    created_to: date | None = None
+    matching_document_ids: list[str] = Field(default_factory=list)
+
+
+class DocumentSummary(BaseModel):
+    id: str
+    title: str
+    original_filename: str
+    media_type: str
+    source_kind: SourceKind
+    status: NodeStatus
+    byte_size: int
+    error_message: str | None = None
+    created_at: datetime
+    updated_at: datetime
+    tags: list[KnowledgeTagSummary] = Field(default_factory=list)
+    derived_kinds: list[str] = Field(default_factory=list)
+    openai_original_file_id: str | None = None
+    download_url: str | None = None
+
+
+class DocumentDetail(DocumentSummary):
+    original_mime_type: str | None = None
+    derived_artifacts: list[DerivedArtifactSummary] = Field(default_factory=list)
+
+
+class DocumentLibrarySummary(BaseModel):
+    id: str
+    title: str
+    description: str | None = None
+    created_at: datetime
+    updated_at: datetime
+    document_count: int = 0
+    filtered_document_count: int = 0
+    tag_count: int = 0
+    vector_store_ready: bool = False
+
+
+class DocumentLibraryState(BaseModel):
+    library: DocumentLibrarySummary
+    tags: list[KnowledgeTagSummary] = Field(default_factory=list)
+    documents: list[DocumentSummary] = Field(default_factory=list)
+    filters: DocumentFilters
+
+
+class DocumentLibraryCapabilities(BaseModel):
+    upload_url: str
+    upload_token_ttl_seconds: int
+    supports_video_audio_extraction: bool
+    accepted_hint: str
+
+
+class DocumentLibraryViewState(BaseModel):
+    access: KnowledgeAccessState
+    library: DocumentLibraryState | None = None
+    capabilities: DocumentLibraryCapabilities
+
+
+class DocumentLibraryStateResult(BaseModel):
+    document_library_state: DocumentLibraryViewState
+    document_detail: DocumentDetail | None = None
+
+
+class DocumentSearchResult(BaseModel):
+    query: str
+    hits: list[DocumentSearchHit] = Field(default_factory=list)
+    total_hits: int = 0
+
+
+class DocumentAskResult(BaseModel):
+    query: str
+    answer: str
+    model: str
+    conversation_id: str
+    citations: list[DocumentCitation] = Field(default_factory=list)
+    hits: list[DocumentSearchHit] = Field(default_factory=list)
+
+
+class DocumentLibraryQueryResult(BaseModel):
+    mode: DocumentQueryMode
+    document_library_state: DocumentLibraryViewState
+    search_result: DocumentSearchResult | None = None
+    ask_result: DocumentAskResult | None = None
+
+
+class DocumentUploadFinalizeResult(BaseModel):
+    document: DocumentSummary
+
+
+class UpdateDocumentLibraryResult(BaseModel):
+    action: UpdateDocumentLibraryAction
+    upload_session: UploadSessionResult | None = None
+    tag: KnowledgeTagSummary | None = None
+    document: DocumentSummary | None = None

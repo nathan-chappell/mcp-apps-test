@@ -1,15 +1,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 import re
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from fastmcp.server.dependencies import get_access_token
 from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 
-from .auth import get_current_clerk_access_token
+from .auth import clerk_user_id_from_access_token, get_current_clerk_user_record
 from .clerk import ClerkAuthService, ClerkUserRecord
 from .db import DatabaseManager
 from .models import (
@@ -30,6 +31,21 @@ from .openai_gateway import (
 from .qa_agent import KnowledgeBaseQuestionAnswerer
 from .schemas import (
     BranchSearchNode,
+    DocumentAskResult,
+    DocumentCitation,
+    DocumentDetail,
+    DocumentFilters,
+    DocumentLibraryCapabilities,
+    DocumentLibraryQueryResult,
+    DocumentLibraryState,
+    DocumentLibraryStateResult,
+    DocumentLibrarySummary,
+    DocumentLibraryViewState,
+    DocumentQueryMode,
+    DocumentSearchHit,
+    DocumentSearchResult,
+    DocumentSummary,
+    DocumentUploadFinalizeResult,
     CommandParserKind,
     DerivedArtifactSummary,
     GraphSelectionMode,
@@ -54,16 +70,16 @@ from .schemas import (
     PendingCommandResult,
     SearchHit,
     TagMatchMode,
+    UpdateDocumentLibraryAction,
+    UpdateDocumentLibraryResult,
     UpdateKnowledgeBaseAction,
     UpdateKnowledgeBaseResult,
-    UploadFinalizeResult,
     UserSummary,
 )
 from .settings import AppSettings
 from .upload_sessions import (
     KnowledgeBaseSessionService,
     NodeDownloadClaims,
-    PendingCommandClaims,
     UploadSessionClaims,
 )
 
@@ -129,6 +145,260 @@ class KnowledgeBaseService:
         self._openai_gateway = openai_gateway
         self._question_answerer = question_answerer
         self._command_agent: KnowledgeBaseCommandAgent | None = None
+
+    async def get_document_library_state(
+        self,
+        *,
+        tag_ids: list[str],
+        tag_match_mode: TagMatchMode,
+        filename_query: str | None,
+        created_from: date | None,
+        created_to: date | None,
+        detail_document_id: str | None,
+    ) -> DocumentLibraryStateResult:
+        await self._database.ensure_ready()
+        async with self._database.session() as session:
+            resolved_user = await self._resolve_request_user(session)
+            knowledge_base = await self._knowledge_base_for_user(
+                session,
+                resolved_user=resolved_user,
+            )
+            filters = await self._document_filters_for_request(
+                session,
+                knowledge_base=knowledge_base,
+                tag_ids=tag_ids,
+                tag_match_mode=tag_match_mode,
+                filename_query=filename_query,
+                created_from=created_from,
+                created_to=created_to,
+            )
+            document_library_state = await self._document_library_view_state(
+                session,
+                resolved_user=resolved_user,
+                knowledge_base=knowledge_base,
+                filters=filters,
+            )
+            document_detail: DocumentDetail | None = None
+            if (
+                detail_document_id is not None
+                and detail_document_id in set(filters.matching_document_ids)
+                and resolved_user.summary.active
+            ):
+                node = await self._node_for_user(
+                    session,
+                    resolved_user=resolved_user,
+                    node_id=detail_document_id,
+                )
+                detail = await self._node_detail(
+                    session,
+                    knowledge_base=knowledge_base,
+                    node=node,
+                    clerk_user_id=resolved_user.summary.clerk_user_id,
+                )
+                document_detail = self._document_detail_from_node_detail(detail)
+            return DocumentLibraryStateResult(
+                document_library_state=document_library_state,
+                document_detail=document_detail,
+            )
+
+    async def query_document_library(
+        self,
+        *,
+        query: str,
+        mode: DocumentQueryMode,
+        tag_ids: list[str],
+        tag_match_mode: TagMatchMode,
+        filename_query: str | None,
+        created_from: date | None,
+        created_to: date | None,
+    ) -> DocumentLibraryQueryResult:
+        normalized_query = query.strip()
+        if not normalized_query:
+            raise ValueError("query is required.")
+
+        await self._database.ensure_ready()
+        async with self._database.session() as session:
+            resolved_user = await self._resolve_request_user(session)
+            self._require_active(resolved_user)
+            knowledge_base = await self._knowledge_base_for_user(
+                session,
+                resolved_user=resolved_user,
+            )
+            filters = await self._document_filters_for_request(
+                session,
+                knowledge_base=knowledge_base,
+                tag_ids=tag_ids,
+                tag_match_mode=tag_match_mode,
+                filename_query=filename_query,
+                created_from=created_from,
+                created_to=created_to,
+            )
+            empty_state = await self._document_library_view_state(
+                session,
+                resolved_user=resolved_user,
+                knowledge_base=knowledge_base,
+                filters=filters,
+            )
+
+            if not filters.matching_document_ids:
+                if mode == "ask":
+                    return DocumentLibraryQueryResult(
+                        mode=mode,
+                        document_library_state=empty_state,
+                        ask_result=DocumentAskResult(
+                            query=normalized_query,
+                            answer="No documents match the current filters yet.",
+                            model=self._settings.openai_agent_model,
+                            conversation_id=knowledge_base.openai_conversation_id or "",
+                            citations=[],
+                            hits=[],
+                        ),
+                    )
+                return DocumentLibraryQueryResult(
+                    mode=mode,
+                    document_library_state=empty_state,
+                    search_result=DocumentSearchResult(
+                        query=normalized_query,
+                        hits=[],
+                        total_hits=0,
+                    ),
+                )
+
+            if knowledge_base.openai_vector_store_id is None:
+                if mode == "ask":
+                    return DocumentLibraryQueryResult(
+                        mode=mode,
+                        document_library_state=empty_state,
+                        ask_result=DocumentAskResult(
+                            query=normalized_query,
+                            answer="There are no indexed documents in this library yet.",
+                            model=self._settings.openai_agent_model,
+                            conversation_id=knowledge_base.openai_conversation_id or "",
+                            citations=[],
+                            hits=[],
+                        ),
+                    )
+                return DocumentLibraryQueryResult(
+                    mode=mode,
+                    document_library_state=empty_state,
+                    search_result=DocumentSearchResult(
+                        query=normalized_query,
+                        hits=[],
+                        total_hits=0,
+                    ),
+                )
+
+            vector_store_filters = self._vector_store_filters_for_documents(
+                knowledge_base=knowledge_base,
+                document_ids=filters.matching_document_ids,
+            )
+
+            if mode == "search":
+                hits = await self._openai_gateway.search_vector_store(
+                    vector_store_id=knowledge_base.openai_vector_store_id,
+                    query=normalized_query,
+                    max_results=self._settings.openai_file_search_max_results,
+                    rewrite_query=True,
+                    filters=vector_store_filters,
+                )
+                refreshed_state = await self._document_library_view_state(
+                    session,
+                    resolved_user=resolved_user,
+                    knowledge_base=knowledge_base,
+                    filters=filters,
+                )
+                return DocumentLibraryQueryResult(
+                    mode=mode,
+                    document_library_state=refreshed_state,
+                    search_result=DocumentSearchResult(
+                        query=normalized_query,
+                        hits=[self._document_search_hit(hit) for hit in hits],
+                        total_hits=len(hits),
+                    ),
+                )
+
+            ask_context = KnowledgeBaseContext(
+                tag_ids=filters.tag_ids,
+                selected_tag_names=filters.selected_tag_names,
+                tag_match_mode=filters.tag_match_mode,
+                media_types=[],
+                include_web=False,
+                rewrite_query=True,
+                branch_factor=3,
+                depth=2,
+                max_results=self._settings.openai_file_search_max_results,
+                visible_node_ids=filters.matching_document_ids,
+                scoped_node_ids=filters.matching_document_ids,
+            )
+            chat_result = await self._question_answerer.ask(
+                knowledge_base_id=knowledge_base.id,
+                vector_store_id=knowledge_base.openai_vector_store_id,
+                question=normalized_query,
+                context=ask_context,
+                conversation_id=knowledge_base.openai_conversation_id,
+                filters=vector_store_filters,
+            )
+            knowledge_base.openai_conversation_id = chat_result.conversation_id
+            knowledge_base.updated_at = _utcnow()
+            await session.commit()
+
+            refreshed_state = await self._document_library_view_state(
+                session,
+                resolved_user=resolved_user,
+                knowledge_base=knowledge_base,
+                filters=filters,
+            )
+            return DocumentLibraryQueryResult(
+                mode=mode,
+                document_library_state=refreshed_state,
+                ask_result=DocumentAskResult(
+                    query=normalized_query,
+                    answer=chat_result.answer,
+                    model=chat_result.model,
+                    conversation_id=chat_result.conversation_id,
+                    citations=[
+                        self._document_citation(citation)
+                        for citation in chat_result.citations
+                    ],
+                    hits=self._document_hits_from_chat_result(chat_result),
+                ),
+            )
+
+    async def update_document_library(
+        self,
+        *,
+        action: UpdateDocumentLibraryAction,
+        document_id: str | None,
+        tag_ids: list[str],
+        name: str | None,
+        color: str | None,
+    ) -> UpdateDocumentLibraryResult:
+        if action == "prepare_upload":
+            upload_session = await self.issue_upload_session()
+            return UpdateDocumentLibraryResult(
+                action=action,
+                upload_session=upload_session,
+            )
+
+        if action == "create_tag":
+            if name is None or not name.strip():
+                raise ValueError("A tag name is required.")
+            tag = await self.create_tag(
+                name=name.strip(),
+                color=color.strip() if color else None,
+            )
+            return UpdateDocumentLibraryResult(
+                action=action,
+                tag=tag,
+            )
+
+        if document_id is None:
+            raise ValueError("document_id is required for set_document_tags.")
+        updated = await self.set_node_tags(node_id=document_id, tag_ids=tag_ids)
+        return UpdateDocumentLibraryResult(
+            action=action,
+            document=self._document_summary_from_node_summary(updated),
+        )
 
     async def get_knowledge_base_info(
         self,
@@ -697,7 +967,7 @@ class KnowledgeBaseService:
         filename: str,
         declared_media_type: str | None,
         tag_ids: list[str],
-    ) -> UploadFinalizeResult:
+    ) -> DocumentUploadFinalizeResult:
         await self._database.ensure_ready()
         async with self._database.session() as session:
             app_user = await self._user_by_clerk_id(session, claims.clerk_user_id)
@@ -858,7 +1128,9 @@ class KnowledgeBaseService:
                 node=node,
                 clerk_user_id=resolved_user.summary.clerk_user_id,
             )
-            return UploadFinalizeResult(node=node_summary)
+            return DocumentUploadFinalizeResult(
+                document=self._document_summary_from_node_summary(node_summary)
+            )
 
     async def download_node_bytes(
         self,
@@ -1579,22 +1851,251 @@ class KnowledgeBaseService:
         )
         derived.updated_at = _utcnow()
 
-    async def _resolve_request_user(self, session) -> ResolvedUser:
-        token = get_current_clerk_access_token()
-        if token is None:
-            app_user = await self._ensure_local_dev_user(session)
-            return ResolvedUser(
-                app_user=app_user,
-                summary=UserSummary(
-                    clerk_user_id=app_user.clerk_user_id,
-                    display_name=app_user.display_name or "Local Developer",
-                    primary_email=app_user.primary_email,
-                    active=app_user.active,
-                    role=app_user.role,
-                ),
+    async def _document_filters_for_request(
+        self,
+        session,
+        *,
+        knowledge_base: KnowledgeBase,
+        tag_ids: list[str],
+        tag_match_mode: TagMatchMode,
+        filename_query: str | None,
+        created_from: date | None,
+        created_to: date | None,
+    ) -> DocumentFilters:
+        if created_from is not None and created_to is not None and created_from > created_to:
+            raise ValueError("created_from must be on or before created_to.")
+
+        tag_records = await self._knowledge_tags_by_ids(
+            session,
+            knowledge_base_id=knowledge_base.id,
+            tag_ids=tag_ids,
+        )
+        normalized_filename_query = (
+            filename_query.strip().lower() if filename_query and filename_query.strip() else None
+        )
+        selected_tag_ids = [tag.id for tag in tag_records]
+        selected_tag_names = [tag.name for tag in tag_records]
+        required_tag_ids = set(selected_tag_ids)
+
+        matching_document_ids: list[str] = []
+        for node in sorted(
+            knowledge_base.nodes,
+            key=lambda item: (item.created_at, item.updated_at),
+            reverse=True,
+        ):
+            node_tag_ids = {link.tag_id for link in node.tag_links}
+            if required_tag_ids:
+                if tag_match_mode == "all" and not required_tag_ids.issubset(node_tag_ids):
+                    continue
+                if tag_match_mode == "any" and not required_tag_ids.intersection(node_tag_ids):
+                    continue
+
+            if normalized_filename_query is not None and normalized_filename_query not in (
+                node.original_filename.lower()
+            ):
+                continue
+
+            created_date = (
+                node.created_at.astimezone(UTC).date()
+                if node.created_at.tzinfo is not None
+                else node.created_at.date()
+            )
+            if created_from is not None and created_date < created_from:
+                continue
+            if created_to is not None and created_date > created_to:
+                continue
+            matching_document_ids.append(node.id)
+
+        return DocumentFilters(
+            tag_ids=selected_tag_ids,
+            selected_tag_names=selected_tag_names,
+            tag_match_mode=tag_match_mode,
+            filename_query=normalized_filename_query,
+            created_from=created_from,
+            created_to=created_to,
+            matching_document_ids=matching_document_ids,
+        )
+
+    async def _document_library_view_state(
+        self,
+        session,
+        *,
+        resolved_user: ResolvedUser,
+        knowledge_base: KnowledgeBase,
+        filters: DocumentFilters,
+    ) -> DocumentLibraryViewState:
+        library_state: DocumentLibraryState | None = None
+        if resolved_user.summary.active:
+            library_state = await self._document_library_state(
+                session,
+                knowledge_base=knowledge_base,
+                filters=filters,
+                clerk_user_id=resolved_user.summary.clerk_user_id,
             )
 
-        clerk_record = await self._clerk_auth.get_user_record(token.subject)
+        access = KnowledgeAccessState(
+            status="active" if resolved_user.summary.active else "pending_access",
+            message=(
+                "Access active. You can upload documents, manage tags, and search the library."
+                if resolved_user.summary.active
+                else "Signed in successfully. Access is pending manual activation in Clerk."
+            ),
+            user=resolved_user.summary,
+        )
+        return DocumentLibraryViewState(
+            access=access,
+            library=library_state,
+            capabilities=DocumentLibraryCapabilities(
+                upload_url=f"{self._settings.normalized_app_base_url}/api/uploads",
+                upload_token_ttl_seconds=self._settings.upload_session_max_age_seconds,
+                supports_video_audio_extraction=True,
+                accepted_hint=(
+                    "Upload text-like files directly, plus images, audio, and video. "
+                    "Filter the library by tags, filename, and created date."
+                ),
+            ),
+        )
+
+    async def _document_library_state(
+        self,
+        session,
+        *,
+        knowledge_base: KnowledgeBase,
+        filters: DocumentFilters,
+        clerk_user_id: str,
+    ) -> DocumentLibraryState:
+        tag_counts = {tag.id: 0 for tag in knowledge_base.tags}
+        for node in knowledge_base.nodes:
+            for link in node.tag_links:
+                tag_counts[link.tag_id] = tag_counts.get(link.tag_id, 0) + 1
+
+        matching_document_ids = set(filters.matching_document_ids)
+        documents: list[DocumentSummary] = []
+        for node in sorted(
+            knowledge_base.nodes,
+            key=lambda item: (item.created_at, item.updated_at),
+            reverse=True,
+        ):
+            if node.id not in matching_document_ids:
+                continue
+            node_summary = await self._node_summary(
+                session,
+                knowledge_base=knowledge_base,
+                node=node,
+                clerk_user_id=clerk_user_id,
+            )
+            documents.append(self._document_summary_from_node_summary(node_summary))
+
+        tags = [
+            self._tag_summary(tag, node_count=tag_counts.get(tag.id, 0))
+            for tag in sorted(knowledge_base.tags, key=lambda item: item.name.lower())
+        ]
+        return DocumentLibraryState(
+            library=DocumentLibrarySummary(
+                id=knowledge_base.id,
+                title=knowledge_base.title,
+                description=knowledge_base.description,
+                created_at=knowledge_base.created_at,
+                updated_at=knowledge_base.updated_at,
+                document_count=len(knowledge_base.nodes),
+                filtered_document_count=len(documents),
+                tag_count=len(tags),
+                vector_store_ready=knowledge_base.openai_vector_store_id is not None,
+            ),
+            tags=tags,
+            documents=documents,
+            filters=filters,
+        )
+
+    def _vector_store_filters_for_documents(
+        self,
+        *,
+        knowledge_base: KnowledgeBase,
+        document_ids: list[str],
+    ):
+        all_document_ids = {node.id for node in knowledge_base.nodes}
+        scoped_document_ids = [] if set(document_ids) == all_document_ids else document_ids
+        return build_filter_groups(
+            node_ids=scoped_document_ids,
+            media_types=[],
+            tag_slugs=[],
+            tag_match_mode="all",
+        )
+
+    @staticmethod
+    def _document_summary_from_node_summary(node: KnowledgeNodeSummary) -> DocumentSummary:
+        return DocumentSummary(
+            id=node.id,
+            title=node.display_title,
+            original_filename=node.original_filename,
+            media_type=node.media_type,
+            source_kind=node.source_kind,
+            status=node.status,
+            byte_size=node.byte_size,
+            error_message=node.error_message,
+            created_at=node.created_at,
+            updated_at=node.updated_at,
+            tags=node.tags,
+            derived_kinds=node.derived_kinds,
+            openai_original_file_id=node.openai_original_file_id,
+            download_url=node.download_url,
+        )
+
+    @classmethod
+    def _document_detail_from_node_detail(cls, node: KnowledgeNodeDetail) -> DocumentDetail:
+        return DocumentDetail(
+            **cls._document_summary_from_node_summary(node).model_dump(mode="python"),
+            original_mime_type=node.original_mime_type,
+            derived_artifacts=node.derived_artifacts,
+        )
+
+    @staticmethod
+    def _document_search_hit(hit: SearchHit) -> DocumentSearchHit:
+        return DocumentSearchHit(
+            document_id=hit.node_id,
+            document_title=hit.node_title,
+            original_filename=hit.original_filename,
+            derived_artifact_id=hit.derived_artifact_id,
+            openai_file_id=hit.openai_file_id,
+            original_openai_file_id=hit.original_openai_file_id,
+            media_type=hit.media_type,
+            source_kind=hit.source_kind,
+            score=hit.score,
+            text=hit.text,
+            tags=hit.tags,
+        )
+
+    @staticmethod
+    def _document_hits_from_chat_result(chat_result: KnowledgeChatResult) -> list[DocumentSearchHit]:
+        hits_by_key: dict[str, DocumentSearchHit] = {}
+        for search_call in chat_result.search_calls:
+            for hit in search_call.results:
+                converted = KnowledgeBaseService._document_search_hit(hit)
+                key = f"{converted.document_id}:{converted.openai_file_id}:{converted.text[:160]}"
+                hits_by_key.setdefault(key, converted)
+        return list(hits_by_key.values())
+
+    @staticmethod
+    def _document_citation(citation: KnowledgeAnswerCitation) -> DocumentCitation:
+        return DocumentCitation(
+            label=citation.label,
+            document_id=citation.node_id,
+            document_title=citation.node_title,
+            original_filename=citation.original_filename,
+            quote=citation.quote,
+            url=citation.url,
+            source="web" if citation.source == "web" else "document_library",
+        )
+
+    async def _resolve_request_user(self, session) -> ResolvedUser:
+        clerk_record = get_current_clerk_user_record()
+        if clerk_record is None:
+            access_token = get_access_token()
+            if access_token is None:
+                raise PermissionError("Authentication is required.")
+            clerk_record = await self._clerk_auth.get_user_record(
+                clerk_user_id_from_access_token(access_token)
+            )
         app_user = await self._upsert_clerk_user(session, clerk_record)
         return ResolvedUser(
             app_user=app_user,
@@ -1629,28 +2130,6 @@ class KnowledgeBaseService:
             existing.display_name = clerk_record.display_name
             existing.active = clerk_record.active
             existing.role = clerk_record.role
-            existing.last_seen_at = now
-        await session.commit()
-        await session.refresh(existing)
-        return existing
-
-    async def _ensure_local_dev_user(self, session) -> AppUser:
-        existing = await self._user_by_clerk_id(session, "local-dev")
-        now = _utcnow()
-        if existing is None:
-            existing = AppUser(
-                clerk_user_id="local-dev",
-                primary_email="local-dev@example.com",
-                display_name="Local Developer",
-                active=True,
-                role="admin",
-                last_seen_at=now,
-            )
-            session.add(existing)
-        else:
-            existing.display_name = "Local Developer"
-            existing.active = True
-            existing.role = "admin"
             existing.last_seen_at = now
         await session.commit()
         await session.refresh(existing)
@@ -1694,7 +2173,7 @@ class KnowledgeBaseService:
         knowledge_base = KnowledgeBase(
             user_id=resolved_user.app_user.id,
             title=build_knowledge_base_title(resolved_user.summary.display_name),
-            description="Personal knowledge-base graph",
+            description="Personal document library",
             updated_at=_utcnow(),
         )
         session.add(knowledge_base)
@@ -2288,8 +2767,8 @@ class KnowledgeBaseService:
 def build_knowledge_base_title(display_name: str) -> str:
     normalized = display_name.strip() or "User"
     if normalized.endswith("s"):
-        return f"{normalized}' Knowledge Base"
-    return f"{normalized}'s Knowledge Base"
+        return f"{normalized}' Document Library"
+    return f"{normalized}'s Document Library"
 
 
 def slugify(value: str) -> str:

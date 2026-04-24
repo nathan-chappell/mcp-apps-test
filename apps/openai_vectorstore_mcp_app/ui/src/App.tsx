@@ -1,112 +1,46 @@
-import {
-  applyDocumentTheme,
-  applyHostFonts,
-  applyHostStyleVariables,
-  type McpUiDisplayMode,
-  type McpUiHostContext,
-} from "@modelcontextprotocol/ext-apps";
 import { useApp } from "@modelcontextprotocol/ext-apps/react";
 import {
-  Alert,
-  Badge,
-  Button,
-  Card,
-  Code,
-  Divider,
-  FileInput,
-  Group,
-  Loader,
-  MantineProvider,
-  MultiSelect,
-  NumberInput,
-  ScrollArea,
-  Select,
-  Stack,
-  Switch,
-  Tabs,
-  Text,
-  Textarea,
-  Title,
-} from "@mantine/core";
-import mermaid from "mermaid";
-import {
-  startTransition,
   useEffect,
-  useId,
   useMemo,
-  useRef,
   useState,
-  type CSSProperties,
+  type ChangeEvent,
   type ReactElement,
 } from "react";
 
 import {
-  createHostBridge,
-  createHostControls,
-  type KnowledgeBaseBridge,
-  type KnowledgeBaseHostControls,
+  createAskHostBridge,
+  createLibraryHostBridge,
+  type DocumentLibraryBridge,
 } from "./bridge";
-import { createMockBridge, createMockHostControls } from "./mockBridge";
-import { appCssVariablesResolver, appTheme } from "./theme";
+import { createMockBridge } from "./mockBridge";
 import type {
-  KnowledgeBaseCommandResult,
-  KnowledgeBaseDeskState,
-  KnowledgeBaseState,
-  KnowledgeBranchSearchResult,
-  KnowledgeChatResult,
-  KnowledgeEdgeSummary,
-  KnowledgeFileSearchResult,
-  KnowledgeNodeDetail,
-  KnowledgeNodeSummary,
-  KnowledgeQueryMode,
-  KnowledgeQueryResult,
-  PendingCommandResult,
-  SearchHit,
+  DocumentAskResult,
+  DocumentCitation,
+  DocumentDetail,
+  DocumentFilters,
+  DocumentLibraryQueryResult,
+  DocumentLibraryState,
+  DocumentLibraryStateResult,
+  DocumentSearchHit,
+  KnowledgeTagSummary,
+  QueryDocumentLibraryArguments,
 } from "./types";
-import { isKnowledgeQueryResult } from "./types";
+import {
+  isDocumentLibraryQueryResult,
+  isDocumentLibraryStateResult,
+} from "./types";
 
-mermaid.initialize({
-  startOnLoad: false,
-  securityLevel: "loose",
-  theme: "base",
-  flowchart: {
-    htmlLabels: true,
-    curve: "basis",
-  },
-  themeVariables: {
-    primaryColor: "#e6f4ea",
-    primaryTextColor: "#18303d",
-    primaryBorderColor: "#2d4a52",
-    lineColor: "#496670",
-    secondaryColor: "#fff6dd",
-    tertiaryColor: "#f7f3e8",
-  },
-});
-
-declare global {
-  interface Window {
-    kbNodeClick?: (graphId: string) => void;
-  }
-}
-
-const IMPLEMENTATION = {
-  name: "Knowledge Base Desk",
-  version: "2.0.0",
+const APP_INFO = {
+  name: "Document Library",
+  version: "1.0.0",
 };
 
-type MainTab = "search" | "branch" | "chat";
-
-type SelectionState = {
-  selectedNodeId: string | null;
-  graphSelectionMode: "self" | "children" | "descendants";
-  selectedTagIds: string[];
-  tagMatchMode: "all" | "any";
-  selectedMediaTypes: string[];
-  includeWeb: boolean;
-  rewriteQuery: boolean;
-  branchFactor: number;
-  depth: number;
-  maxResults: number;
+type EditableFilters = {
+  tag_ids: string[];
+  tag_match_mode: "all" | "any";
+  filename_query: string;
+  created_from: string;
+  created_to: string;
 };
 
 function isStandaloneMode(): boolean {
@@ -128,1382 +62,1105 @@ function formatDate(value: string): string {
   return new Date(value).toLocaleString();
 }
 
-function excerpt(value: string, limit = 260): string {
+function excerpt(value: string, limit = 280): string {
   return value.length > limit ? `${value.slice(0, limit - 3)}...` : value;
 }
 
-function escapeMermaidLabel(value: string): string {
-  return value
-    .replace(/&/g, "&amp;")
-    .replace(/"/g, "&quot;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
-}
-
-function graphNodeId(nodeId: string): string {
-  return `node_${nodeId}`;
-}
-
-function nextSelectionMode(
-  current: SelectionState["graphSelectionMode"],
-): SelectionState["graphSelectionMode"] {
-  if (current === "self") {
-    return "children";
-  }
-  if (current === "children") {
-    return "descendants";
-  }
-  return "self";
-}
-
-function statusColor(status: KnowledgeNodeSummary["status"]): string {
-  switch (status) {
-    case "ready":
-      return "teal";
-    case "processing":
-      return "yellow";
-    case "failed":
-      return "red";
-  }
-}
-
-function selectionSummary(
-  knowledgeBase: KnowledgeBaseState | null,
-  selectedNode: KnowledgeNodeSummary | null,
-): string {
-  if (!knowledgeBase) {
-    return "No knowledge base loaded yet.";
-  }
-  if (!selectedNode) {
-    return `Browsing the full graph. ${knowledgeBase.context.scoped_node_ids.length} visible node(s) are in retrieval scope.`;
-  }
-  const mode = knowledgeBase.context.graph_selection_mode;
-  if (mode === "self") {
-    return `Scoped to '${selectedNode.display_title}' only.`;
-  }
-  if (mode === "children") {
-    return `Scoped to '${selectedNode.display_title}' and its direct outgoing neighbors.`;
-  }
-  return `Scoped to '${selectedNode.display_title}' and all reachable descendants.`;
-}
-
-function resolveColorScheme(hostContext?: McpUiHostContext): "light" | "dark" {
-  return hostContext?.theme === "dark" ? "dark" : "light";
-}
-
-function extractSafeAreaStyle(hostContext?: McpUiHostContext): CSSProperties {
+function filtersFromState(state: DocumentLibraryState | null): EditableFilters {
+  const filters = state?.filters;
   return {
-    paddingTop: hostContext?.safeAreaInsets?.top,
-    paddingRight: hostContext?.safeAreaInsets?.right,
-    paddingBottom: hostContext?.safeAreaInsets?.bottom,
-    paddingLeft: hostContext?.safeAreaInsets?.left,
+    tag_ids: filters?.tag_ids ?? [],
+    tag_match_mode: filters?.tag_match_mode ?? "all",
+    filename_query: filters?.filename_query ?? "",
+    created_from: filters?.created_from ?? "",
+    created_to: filters?.created_to ?? "",
   };
 }
 
-function buildSelectionState(
-  state: KnowledgeBaseDeskState,
-): SelectionState {
-  const context = state.knowledge_base?.context;
+function buildStateArgs(filters: EditableFilters, detailDocumentId?: string): {
+  tag_ids: string[];
+  tag_match_mode: "all" | "any";
+  filename_query?: string;
+  created_from?: string;
+  created_to?: string;
+  detail_document_id?: string;
+} {
   return {
-    selectedNodeId: context?.selected_node_id ?? null,
-    graphSelectionMode: context?.graph_selection_mode ?? "self",
-    selectedTagIds: context?.tag_ids ?? [],
-    tagMatchMode: context?.tag_match_mode ?? "all",
-    selectedMediaTypes: context?.media_types ?? [],
-    includeWeb: context?.include_web ?? false,
-    rewriteQuery: context?.rewrite_query ?? true,
-    branchFactor: context?.branch_factor ?? 3,
-    depth: context?.depth ?? 2,
-    maxResults: context?.max_results ?? 8,
+    tag_ids: filters.tag_ids,
+    tag_match_mode: filters.tag_match_mode,
+    ...(filters.filename_query.trim()
+      ? { filename_query: filters.filename_query.trim() }
+      : {}),
+    ...(filters.created_from ? { created_from: filters.created_from } : {}),
+    ...(filters.created_to ? { created_to: filters.created_to } : {}),
+    ...(detailDocumentId ? { detail_document_id: detailDocumentId } : {}),
   };
 }
 
-function normalizeInteger(value: string | number, fallback: number): number {
-  if (typeof value === "number" && Number.isFinite(value)) {
-    return Math.round(value);
-  }
-  if (typeof value === "string") {
-    const parsed = Number.parseInt(value, 10);
-    if (Number.isFinite(parsed)) {
-      return parsed;
-    }
-  }
-  return fallback;
+function buildQueryArgs(
+  filters: EditableFilters,
+  query: string,
+  mode: "search" | "ask",
+): QueryDocumentLibraryArguments {
+  return {
+    query,
+    mode,
+    ...buildStateArgs(filters),
+  };
 }
 
-function tagsVisibleIds(
-  knowledgeBase: KnowledgeBaseState | null,
-  tagIds: string[],
-  tagMatchMode: "all" | "any",
-): Set<string> {
-  if (!knowledgeBase || tagIds.length === 0) {
-    return new Set(knowledgeBase?.nodes.map((node) => node.id) ?? []);
-  }
-  const selected = new Set(tagIds);
-  return new Set(
-    knowledgeBase.nodes
-      .filter((node) => {
-        const nodeTagIds = new Set(node.tags.map((tag) => tag.id));
-        if (tagMatchMode === "all") {
-          return [...selected].every((tagId) => nodeTagIds.has(tagId));
-        }
-        return [...selected].some((tagId) => nodeTagIds.has(tagId));
-      })
-      .map((node) => node.id),
-  );
+function syncTheme(theme?: "light" | "dark"): void {
+  document.documentElement.dataset.theme = theme === "dark" ? "dark" : "light";
 }
 
-function buildModelContextMarkdown(input: {
-  deskState: KnowledgeBaseDeskState;
-  selectionState: SelectionState;
-  fileSearchResult: KnowledgeFileSearchResult | null;
-  branchSearchResult: KnowledgeBranchSearchResult | null;
-  chatResult: KnowledgeChatResult | null;
-  commandResult: KnowledgeBaseCommandResult | null;
-}): string {
-  const knowledgeBase = input.deskState.knowledge_base;
-  const selectedNode =
-    knowledgeBase?.nodes.find(
-      (node) => node.id === input.selectionState.selectedNodeId,
-    ) ?? null;
-  const recentHits =
-    input.fileSearchResult?.hits.map((hit) => hit.node_title) ??
-    input.branchSearchResult?.merged_hits.map((hit) => hit.node_title) ??
-    [];
-  const citations = input.chatResult?.citations.map((citation) => citation.label) ?? [];
-  return [
-    "---",
-    `tool: "query_knowledge_base"`,
-    `knowledge-base-id: "${knowledgeBase?.knowledge_base.id ?? "none"}"`,
-    `selected-node-id: "${selectedNode?.id ?? "none"}"`,
-    `selected-node-title: "${selectedNode?.display_title ?? "none"}"`,
-    `graph-selection-mode: "${input.selectionState.graphSelectionMode}"`,
-    `selected-tag-count: ${input.selectionState.selectedTagIds.length}`,
-    `selected-media-type-count: ${input.selectionState.selectedMediaTypes.length}`,
-    `include-web: ${input.selectionState.includeWeb}`,
-    `rewrite-query: ${input.selectionState.rewriteQuery}`,
-    `branch-factor: ${input.selectionState.branchFactor}`,
-    `depth: ${input.selectionState.depth}`,
-    `max-results: ${input.selectionState.maxResults}`,
-    `last-command: "${input.commandResult?.action ?? "none"}"`,
-    "---",
-    "",
-    `Knowledge base: ${knowledgeBase?.knowledge_base.title ?? "none"}`,
-    `Selected tags: ${
-      knowledgeBase?.tags
-        .filter((tag) => input.selectionState.selectedTagIds.includes(tag.id))
-        .map((tag) => tag.name)
-        .join(", ") || "none"
-    }`,
-    `Visible scoped nodes: ${knowledgeBase?.context.scoped_node_ids.length ?? 0}`,
-    `Recent retrieval hits: ${recentHits.join(", ") || "none"}`,
-    `Recent chat citations: ${citations.join(", ") || "none"}`,
-  ].join("\n");
+function toggleId(current: string[], id: string): string[] {
+  return current.includes(id)
+    ? current.filter((currentId) => currentId !== id)
+    : [...current, id];
 }
 
-function buildMermaidGraph(args: {
-  nodes: KnowledgeNodeSummary[];
-  edges: KnowledgeEdgeSummary[];
-  selectedNodeId: string | null;
-  scopedNodeIds: string[];
-}): string {
-  const scopedSet = new Set(args.scopedNodeIds);
-  const normalIds: string[] = [];
-  const scopedIds: string[] = [];
-
-  const lines = [
-    "flowchart LR",
-    "classDef normal fill:#f7f3e8,stroke:#496670,color:#18303d,stroke-width:1.5px;",
-    "classDef scoped fill:#e7f3ea,stroke:#217a5e,color:#18303d,stroke-width:2px;",
-    "classDef selected fill:#0f766e,stroke:#0b4f4a,color:#ffffff,stroke-width:3px;",
-  ];
-
-  for (const node of args.nodes) {
-    const subtitle = escapeMermaidLabel(node.original_filename);
-    lines.push(
-      `${graphNodeId(node.id)}["${escapeMermaidLabel(
-        node.display_title,
-      )}<br/><small>${subtitle}</small>"]`,
-    );
-    lines.push(`click ${graphNodeId(node.id)} kbNodeClick "Cycle node scope"`);
-    if (node.id === args.selectedNodeId) {
-      continue;
-    }
-    if (scopedSet.has(node.id)) {
-      scopedIds.push(graphNodeId(node.id));
-    } else {
-      normalIds.push(graphNodeId(node.id));
-    }
-  }
-
-  for (const edge of args.edges) {
-    lines.push(
-      `${graphNodeId(edge.from_node_id)} -->|${escapeMermaidLabel(
-        edge.label,
-      )}| ${graphNodeId(edge.to_node_id)}`,
-    );
-  }
-
-  if (normalIds.length > 0) {
-    lines.push(`class ${normalIds.join(",")} normal`);
-  }
-  if (scopedIds.length > 0) {
-    lines.push(`class ${scopedIds.join(",")} scoped`);
-  }
-  if (args.selectedNodeId) {
-    lines.push(`class ${graphNodeId(args.selectedNodeId)} selected`);
-  }
-
-  return lines.join("\n");
-}
-
-function GraphCard(props: {
-  nodes: KnowledgeNodeSummary[];
-  edges: KnowledgeEdgeSummary[];
-  selectedNodeId: string | null;
-  scopedNodeIds: string[];
-  onNodeClick: (nodeId: string) => void;
+function EmptyState(props: {
+  title: string;
+  body: string;
+  loading?: boolean;
 }): ReactElement {
-  const containerRef = useRef<HTMLDivElement | null>(null);
-  const renderId = useId().replace(/:/g, "_");
-  const [renderError, setRenderError] = useState<string | null>(null);
-  const graphSource = useMemo(
-    () =>
-      buildMermaidGraph({
-        nodes: props.nodes,
-        edges: props.edges,
-        selectedNodeId: props.selectedNodeId,
-        scopedNodeIds: props.scopedNodeIds,
-      }),
-    [props.edges, props.nodes, props.scopedNodeIds, props.selectedNodeId],
-  );
-
-  useEffect(() => {
-    window.kbNodeClick = (mermaidNodeId: string) => {
-      const nodeId = mermaidNodeId.replace(/^node_/, "");
-      props.onNodeClick(nodeId);
-    };
-    return () => {
-      window.kbNodeClick = undefined;
-    };
-  }, [props]);
-
-  useEffect(() => {
-    let cancelled = false;
-
-    if (!containerRef.current) {
-      return;
-    }
-    if (props.nodes.length === 0) {
-      containerRef.current.innerHTML = "";
-      setRenderError(null);
-      return;
-    }
-
-    const renderGraph = async (): Promise<void> => {
-      try {
-        const { svg, bindFunctions } = await mermaid.render(
-          `graph_${renderId}`,
-          graphSource,
-        );
-        if (cancelled || !containerRef.current) {
-          return;
-        }
-        containerRef.current.innerHTML = svg;
-        bindFunctions?.(containerRef.current);
-        setRenderError(null);
-      } catch (error) {
-        if (!cancelled) {
-          setRenderError(
-            error instanceof Error ? error.message : "Mermaid render failed.",
-          );
-        }
-      }
-    };
-
-    void renderGraph();
-    return () => {
-      cancelled = true;
-    };
-  }, [graphSource, props.nodes.length, renderId]);
-
-  return (
-    <Card className="kb-card graph-card" shadow="sm" radius="lg" withBorder>
-      <Group justify="space-between" align="flex-start">
-        <div>
-          <Text className="section-kicker">Graph</Text>
-          <Title order={3}>Visible Knowledge Graph</Title>
-        </div>
-        <Badge variant="light" color="teal">
-          {props.scopedNodeIds.length} in scope
-        </Badge>
-      </Group>
-      <Text c="dimmed" size="sm">
-        Click a node to cycle through self, direct children, and all descendants.
-      </Text>
-      {renderError ? (
-        <Alert color="red" title="Graph rendering failed">
-          {renderError}
-        </Alert>
-      ) : null}
-      {props.nodes.length === 0 ? (
-        <EmptyState
-          title="No visible nodes"
-          body="Upload a document or loosen the active tag filters to populate the graph."
-        />
-      ) : (
-        <div ref={containerRef} className="graph-svg" />
-      )}
-    </Card>
-  );
-}
-
-function EmptyState(props: { title: string; body: string }): ReactElement {
   return (
     <div className="empty-state">
-      <Title order={4}>{props.title}</Title>
-      <Text c="dimmed">{props.body}</Text>
+      {props.loading ? <div className="spinner" /> : null}
+      <h2>{props.title}</h2>
+      <p>{props.body}</p>
     </div>
   );
 }
 
-function ResultHitList(props: {
-  hits: SearchHit[];
-  onFocusNode: (nodeId: string) => void;
+function StatusBanner(props: {
+  tone: "neutral" | "success" | "danger";
+  message: string;
 }): ReactElement {
-  if (props.hits.length === 0) {
-    return (
-      <EmptyState
-        title="No matching hits"
-        body="Try broadening the graph scope, clearing tag filters, or changing the query."
-      />
-    );
-  }
+  return <div className={`status-banner tone-${props.tone}`}>{props.message}</div>;
+}
+
+function FilterPanel(props: {
+  title: string;
+  tags: KnowledgeTagSummary[];
+  filters: EditableFilters;
+  setFilters: React.Dispatch<React.SetStateAction<EditableFilters>>;
+  onApply: () => Promise<void>;
+  onClear: () => Promise<void>;
+  busy: boolean;
+}): ReactElement {
   return (
-    <Stack gap="sm">
-      {props.hits.map((hit) => (
-        <Card key={`${hit.node_id}:${hit.derived_artifact_id ?? "node"}`} className="result-card" withBorder>
-          <Group justify="space-between" align="flex-start">
-            <div>
-              <Button
-                variant="subtle"
-                size="compact-sm"
-                className="inline-button"
-                onClick={() => props.onFocusNode(hit.node_id)}
-              >
-                {hit.node_title}
-              </Button>
-              <Text c="dimmed" size="sm">
-                {hit.original_filename}
-              </Text>
-            </div>
-            <Badge variant="light" color="teal">
-              {Math.round(hit.score * 100)}%
-            </Badge>
-          </Group>
-          <Text size="sm">{excerpt(hit.text)}</Text>
-          <Group gap="xs">
-            {hit.tags.map((tag) => (
-              <Badge key={`${hit.node_id}:${tag}`} variant="dot" color="blue">
-                {tag}
-              </Badge>
-            ))}
-          </Group>
-        </Card>
-      ))}
-    </Stack>
+    <section className="panel">
+      <div className="panel-header">
+        <div>
+          <p className="eyebrow">Filters</p>
+          <h2>{props.title}</h2>
+        </div>
+        <div className="segmented-control">
+          <button
+            type="button"
+            className={props.filters.tag_match_mode === "all" ? "active" : ""}
+            onClick={() =>
+              props.setFilters((current) => ({ ...current, tag_match_mode: "all" }))
+            }
+          >
+            Match all
+          </button>
+          <button
+            type="button"
+            className={props.filters.tag_match_mode === "any" ? "active" : ""}
+            onClick={() =>
+              props.setFilters((current) => ({ ...current, tag_match_mode: "any" }))
+            }
+          >
+            Match any
+          </button>
+        </div>
+      </div>
+
+      <div className="filter-grid">
+        <label className="field">
+          <span>Filename</span>
+          <input
+            type="text"
+            value={props.filters.filename_query}
+            onChange={(event) =>
+              props.setFilters((current) => ({
+                ...current,
+                filename_query: event.target.value,
+              }))
+            }
+            placeholder="invoice, runbook, notes..."
+          />
+        </label>
+        <label className="field">
+          <span>Created from</span>
+          <input
+            type="date"
+            value={props.filters.created_from}
+            onChange={(event) =>
+              props.setFilters((current) => ({
+                ...current,
+                created_from: event.target.value,
+              }))
+            }
+          />
+        </label>
+        <label className="field">
+          <span>Created to</span>
+          <input
+            type="date"
+            value={props.filters.created_to}
+            onChange={(event) =>
+              props.setFilters((current) => ({
+                ...current,
+                created_to: event.target.value,
+              }))
+            }
+          />
+        </label>
+      </div>
+
+      <div className="tag-picker">
+        {props.tags.length === 0 ? <p className="muted">No tags yet.</p> : null}
+        {props.tags.map((tag) => {
+          const active = props.filters.tag_ids.includes(tag.id);
+          return (
+            <button
+              key={tag.id}
+              type="button"
+              className={`tag-pill ${active ? "active" : ""}`}
+              onClick={() =>
+                props.setFilters((current) => ({
+                  ...current,
+                  tag_ids: toggleId(current.tag_ids, tag.id),
+                }))
+              }
+            >
+              <span
+                className="tag-dot"
+                style={{ backgroundColor: tag.color ?? "#0f766e" }}
+              />
+              <span>{tag.name}</span>
+              <strong>{tag.node_count}</strong>
+            </button>
+          );
+        })}
+      </div>
+
+      <div className="action-row">
+        <button type="button" className="primary-button" onClick={props.onApply} disabled={props.busy}>
+          {props.busy ? "Loading..." : "Apply filters"}
+        </button>
+        <button type="button" className="ghost-button" onClick={props.onClear} disabled={props.busy}>
+          Clear
+        </button>
+      </div>
+    </section>
   );
 }
 
-function HostedKnowledgeBaseDeskApp(): ReactElement {
-  const [hostContext, setHostContext] = useState<McpUiHostContext | undefined>();
-  const [initialQueryResult, setInitialQueryResult] =
-    useState<KnowledgeQueryResult | null>(null);
+function DocumentList(props: {
+  library: DocumentLibraryState;
+  selectedDocumentId: string | null;
+  onSelect: (documentId: string) => Promise<void>;
+  busy: boolean;
+}): ReactElement {
+  if (props.library.documents.length === 0) {
+    return (
+      <section className="panel">
+        <p className="eyebrow">Documents</p>
+        <EmptyState
+          title="No matching documents"
+          body="Try clearing filters or upload a new file."
+        />
+      </section>
+    );
+  }
 
+  return (
+    <section className="panel">
+      <div className="panel-header">
+        <div>
+          <p className="eyebrow">Documents</p>
+          <h2>{props.library.library.filtered_document_count} in view</h2>
+        </div>
+        <p className="muted">
+          {props.library.library.document_count} total in the library
+        </p>
+      </div>
+      <div className="document-list">
+        {props.library.documents.map((document) => {
+          const active = props.selectedDocumentId === document.id;
+          return (
+            <button
+              key={document.id}
+              type="button"
+              className={`document-card ${active ? "active" : ""}`}
+              onClick={() => props.onSelect(document.id)}
+              disabled={props.busy}
+            >
+              <div className="document-card-top">
+                <h3>{document.title}</h3>
+                <span className={`status-chip status-${document.status}`}>
+                  {document.status}
+                </span>
+              </div>
+              <p className="filename">{document.original_filename}</p>
+              <p className="muted">
+                {formatDate(document.created_at)} • {formatBytes(document.byte_size)}
+              </p>
+              <div className="tag-inline-row">
+                {document.tags.map((tag) => (
+                  <span key={tag.id} className="mini-tag">
+                    {tag.name}
+                  </span>
+                ))}
+              </div>
+            </button>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+function DocumentDetailPanel(props: {
+  detail: DocumentDetail | null;
+  allTags: KnowledgeTagSummary[];
+  editingTagIds: string[];
+  setEditingTagIds: React.Dispatch<React.SetStateAction<string[]>>;
+  onSaveTags: () => Promise<void>;
+  busy: boolean;
+}): ReactElement {
+  if (!props.detail) {
+    return (
+      <section className="panel">
+        <p className="eyebrow">Detail</p>
+        <EmptyState
+          title="Pick a document"
+          body="Select a document from the list to review metadata and edit tags."
+        />
+      </section>
+    );
+  }
+
+  return (
+    <section className="panel">
+      <div className="panel-header">
+        <div>
+          <p className="eyebrow">Detail</p>
+          <h2>{props.detail.title}</h2>
+        </div>
+        {props.detail.download_url ? (
+          <a className="ghost-button" href={props.detail.download_url} target="_blank" rel="noreferrer">
+            Download
+          </a>
+        ) : null}
+      </div>
+
+      <dl className="metadata-grid">
+        <div>
+          <dt>Filename</dt>
+          <dd>{props.detail.original_filename}</dd>
+        </div>
+        <div>
+          <dt>Created</dt>
+          <dd>{formatDate(props.detail.created_at)}</dd>
+        </div>
+        <div>
+          <dt>Type</dt>
+          <dd>{props.detail.media_type}</dd>
+        </div>
+        <div>
+          <dt>Size</dt>
+          <dd>{formatBytes(props.detail.byte_size)}</dd>
+        </div>
+      </dl>
+
+      <div className="editor-block">
+        <div className="panel-header compact">
+          <h3>Tags</h3>
+          <button type="button" className="primary-button" onClick={props.onSaveTags} disabled={props.busy}>
+            Save tags
+          </button>
+        </div>
+        <div className="tag-picker">
+          {props.allTags.map((tag) => {
+            const active = props.editingTagIds.includes(tag.id);
+            return (
+              <button
+                key={tag.id}
+                type="button"
+                className={`tag-pill ${active ? "active" : ""}`}
+                onClick={() =>
+                  props.setEditingTagIds((current) => toggleId(current, tag.id))
+                }
+              >
+                <span
+                  className="tag-dot"
+                  style={{ backgroundColor: tag.color ?? "#0f766e" }}
+                />
+                <span>{tag.name}</span>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      <div className="artifact-stack">
+        {props.detail.derived_artifacts.length === 0 ? (
+          <p className="muted">No derived text preview is available yet.</p>
+        ) : null}
+        {props.detail.derived_artifacts.map((artifact) => (
+          <article key={artifact.id} className="artifact-card">
+            <div className="panel-header compact">
+              <h3>{artifact.kind}</h3>
+              <span className="muted">{formatDate(artifact.updated_at)}</span>
+            </div>
+            <pre>{excerpt(artifact.text_content, 1200)}</pre>
+          </article>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function UploadPanel(props: {
+  allTags: KnowledgeTagSummary[];
+  uploadTagIds: string[];
+  setUploadTagIds: React.Dispatch<React.SetStateAction<string[]>>;
+  uploadFile: File | null;
+  setUploadFile: React.Dispatch<React.SetStateAction<File | null>>;
+  newTagName: string;
+  setNewTagName: React.Dispatch<React.SetStateAction<string>>;
+  newTagColor: string;
+  setNewTagColor: React.Dispatch<React.SetStateAction<string>>;
+  onCreateTag: () => Promise<void>;
+  onUpload: () => Promise<void>;
+  busy: boolean;
+}): ReactElement {
+  return (
+    <section className="panel">
+      <div className="panel-header">
+        <div>
+          <p className="eyebrow">Ingest</p>
+          <h2>Upload and tag</h2>
+        </div>
+      </div>
+
+      <label className="field">
+        <span>Choose file</span>
+        <input
+          type="file"
+          onChange={(event: ChangeEvent<HTMLInputElement>) =>
+            props.setUploadFile(event.target.files?.[0] ?? null)
+          }
+        />
+      </label>
+
+      <div className="tag-picker">
+        {props.allTags.map((tag) => {
+          const active = props.uploadTagIds.includes(tag.id);
+          return (
+            <button
+              key={tag.id}
+              type="button"
+              className={`tag-pill ${active ? "active" : ""}`}
+              onClick={() =>
+                props.setUploadTagIds((current) => toggleId(current, tag.id))
+              }
+            >
+              <span
+                className="tag-dot"
+                style={{ backgroundColor: tag.color ?? "#0f766e" }}
+              />
+              <span>{tag.name}</span>
+            </button>
+          );
+        })}
+      </div>
+
+      <div className="action-row">
+        <button type="button" className="primary-button" onClick={props.onUpload} disabled={props.busy || !props.uploadFile}>
+          {props.busy ? "Uploading..." : "Upload document"}
+        </button>
+      </div>
+
+      <div className="divider" />
+
+      <div className="panel-header compact">
+        <h3>Create tag</h3>
+      </div>
+      <div className="filter-grid">
+        <label className="field">
+          <span>Name</span>
+          <input
+            type="text"
+            value={props.newTagName}
+            onChange={(event) => props.setNewTagName(event.target.value)}
+            placeholder="research, invoices, sprint-12"
+          />
+        </label>
+        <label className="field">
+          <span>Color</span>
+          <input
+            type="color"
+            value={props.newTagColor}
+            onChange={(event) => props.setNewTagColor(event.target.value)}
+          />
+        </label>
+      </div>
+      <div className="action-row">
+        <button type="button" className="ghost-button" onClick={props.onCreateTag} disabled={props.busy || !props.newTagName.trim()}>
+          Create tag
+        </button>
+      </div>
+    </section>
+  );
+}
+
+function SearchResultPanel(props: {
+  hits: DocumentSearchHit[];
+}): ReactElement {
+  if (props.hits.length === 0) {
+    return (
+      <section className="panel">
+        <p className="eyebrow">Results</p>
+        <EmptyState
+          title="No matches"
+          body="Try broadening the filters or changing the query."
+        />
+      </section>
+    );
+  }
+
+  return (
+    <section className="panel">
+      <div className="panel-header">
+        <div>
+          <p className="eyebrow">Results</p>
+          <h2>{props.hits.length} matching documents</h2>
+        </div>
+      </div>
+      <div className="result-list">
+        {props.hits.map((hit) => (
+          <article key={`${hit.document_id}:${hit.openai_file_id}`} className="result-card">
+            <div className="panel-header compact">
+              <div>
+                <h3>{hit.document_title}</h3>
+                <p className="filename">{hit.original_filename}</p>
+              </div>
+              <span className="score-chip">{Math.round(hit.score * 100)}%</span>
+            </div>
+            <p>{excerpt(hit.text)}</p>
+            <div className="tag-inline-row">
+              {hit.tags.map((tag) => (
+                <span key={`${hit.document_id}:${tag}`} className="mini-tag">
+                  {tag}
+                </span>
+              ))}
+            </div>
+          </article>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function CitationList(props: { citations: DocumentCitation[] }): ReactElement | null {
+  if (props.citations.length === 0) {
+    return null;
+  }
+  return (
+    <section className="panel">
+      <div className="panel-header compact">
+        <h3>Citations</h3>
+      </div>
+      <div className="citation-list">
+        {props.citations.map((citation, index) => (
+          <article key={`${citation.label}:${index}`} className="citation-card">
+            <strong>{citation.label}</strong>
+            {citation.original_filename ? (
+              <p className="filename">{citation.original_filename}</p>
+            ) : null}
+            {citation.quote ? <p>{excerpt(citation.quote, 220)}</p> : null}
+            {citation.url ? (
+              <a href={citation.url} target="_blank" rel="noreferrer">
+                {citation.url}
+              </a>
+            ) : null}
+          </article>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function LibraryScreen(props: {
+  bridge: DocumentLibraryBridge;
+  initialState: DocumentLibraryStateResult;
+}): ReactElement {
+  const [stateResult, setStateResult] = useState<DocumentLibraryStateResult>(
+    props.initialState,
+  );
+  const [filters, setFilters] = useState<EditableFilters>(
+    filtersFromState(props.initialState.document_library_state.library),
+  );
+  const [selectedDocumentId, setSelectedDocumentId] = useState<string | null>(
+    props.initialState.document_detail?.id ?? null,
+  );
+  const [editingTagIds, setEditingTagIds] = useState<string[]>(
+    props.initialState.document_detail?.tags.map((tag) => tag.id) ?? [],
+  );
+  const [uploadTagIds, setUploadTagIds] = useState<string[]>([]);
+  const [uploadFile, setUploadFile] = useState<File | null>(null);
+  const [newTagName, setNewTagName] = useState("");
+  const [newTagColor, setNewTagColor] = useState("#0f766e");
+  const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const library = stateResult.document_library_state.library;
+  const detail = stateResult.document_detail;
+  const tags = library?.tags ?? [];
+
+  useEffect(() => {
+    if (detail) {
+      setSelectedDocumentId(detail.id);
+      setEditingTagIds(detail.tags.map((tag) => tag.id));
+    }
+  }, [detail]);
+
+  async function loadState(detailDocumentId?: string): Promise<void> {
+    setBusy(true);
+    setErrorMessage(null);
+    try {
+      const payload = await props.bridge.get_document_library_state(
+        buildStateArgs(filters, detailDocumentId),
+      );
+      setStateResult(payload);
+    } catch (error) {
+      setErrorMessage(String(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function applyFilters(): Promise<void> {
+    await loadState(selectedDocumentId ?? undefined);
+  }
+
+  async function clearFilters(): Promise<void> {
+    const cleared: EditableFilters = {
+      tag_ids: [],
+      tag_match_mode: "all",
+      filename_query: "",
+      created_from: "",
+      created_to: "",
+    };
+    setFilters(cleared);
+    setSelectedDocumentId(null);
+    setBusy(true);
+    setErrorMessage(null);
+    try {
+      const payload = await props.bridge.get_document_library_state(
+        buildStateArgs(cleared),
+      );
+      setStateResult(payload);
+    } catch (error) {
+      setErrorMessage(String(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function selectDocument(documentId: string): Promise<void> {
+    setSelectedDocumentId(documentId);
+    await loadState(documentId);
+  }
+
+  async function saveDocumentTags(): Promise<void> {
+    if (!selectedDocumentId) {
+      return;
+    }
+    setBusy(true);
+    setStatusMessage(null);
+    setErrorMessage(null);
+    try {
+      await props.bridge.update_document_library({
+        action: "set_document_tags",
+        document_id: selectedDocumentId,
+        tag_ids: editingTagIds,
+      });
+      await loadState(selectedDocumentId);
+      setStatusMessage("Document tags updated.");
+    } catch (error) {
+      setErrorMessage(String(error));
+      setBusy(false);
+    }
+  }
+
+  async function createTag(): Promise<void> {
+    setBusy(true);
+    setStatusMessage(null);
+    setErrorMessage(null);
+    try {
+      await props.bridge.update_document_library({
+        action: "create_tag",
+        name: newTagName.trim(),
+        color: newTagColor,
+      });
+      setNewTagName("");
+      await loadState(selectedDocumentId ?? undefined);
+      setStatusMessage("Tag created.");
+    } catch (error) {
+      setErrorMessage(String(error));
+      setBusy(false);
+    }
+  }
+
+  async function uploadDocument(): Promise<void> {
+    if (!uploadFile) {
+      return;
+    }
+    setBusy(true);
+    setStatusMessage(null);
+    setErrorMessage(null);
+    try {
+      const payload = await props.bridge.upload_document({
+        tag_ids: uploadTagIds,
+        file: uploadFile,
+      });
+      setUploadFile(null);
+      setUploadTagIds([]);
+      await loadState(payload.document.id);
+      setStatusMessage("Document uploaded.");
+    } catch (error) {
+      setErrorMessage(String(error));
+      setBusy(false);
+    }
+  }
+
+  if (!library) {
+    return (
+      <div className="page-shell">
+        <EmptyState
+          title="No library state"
+          body={stateResult.document_library_state.access.message}
+        />
+      </div>
+    );
+  }
+
+  return (
+    <div className="page-shell">
+      <header className="hero">
+        <div>
+          <p className="eyebrow">Document Library</p>
+          <h1>{library.library.title}</h1>
+          <p className="hero-copy">
+            Browse files, review metadata, manage tags, and upload new source
+            material without the old graph overhead.
+          </p>
+        </div>
+        <div className="hero-stats">
+          <div className="stat-chip">
+            <strong>{library.library.filtered_document_count}</strong>
+            <span>In view</span>
+          </div>
+          <div className="stat-chip">
+            <strong>{library.library.tag_count}</strong>
+            <span>Tags</span>
+          </div>
+        </div>
+      </header>
+
+      {statusMessage ? (
+        <StatusBanner tone="success" message={statusMessage} />
+      ) : null}
+      {errorMessage ? <StatusBanner tone="danger" message={errorMessage} /> : null}
+
+      <div className="main-grid">
+        <div className="main-column">
+          <FilterPanel
+            title="Filter by tag, filename, and created date"
+            tags={tags}
+            filters={filters}
+            setFilters={setFilters}
+            onApply={applyFilters}
+            onClear={clearFilters}
+            busy={busy}
+          />
+          <DocumentList
+            library={library}
+            selectedDocumentId={selectedDocumentId}
+            onSelect={selectDocument}
+            busy={busy}
+          />
+        </div>
+        <div className="side-column">
+          <DocumentDetailPanel
+            detail={detail}
+            allTags={tags}
+            editingTagIds={editingTagIds}
+            setEditingTagIds={setEditingTagIds}
+            onSaveTags={saveDocumentTags}
+            busy={busy}
+          />
+          <UploadPanel
+            allTags={tags}
+            uploadTagIds={uploadTagIds}
+            setUploadTagIds={setUploadTagIds}
+            uploadFile={uploadFile}
+            setUploadFile={setUploadFile}
+            newTagName={newTagName}
+            setNewTagName={setNewTagName}
+            newTagColor={newTagColor}
+            setNewTagColor={setNewTagColor}
+            onCreateTag={createTag}
+            onUpload={uploadDocument}
+            busy={busy}
+          />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function AskScreen(props: {
+  bridge: DocumentLibraryBridge;
+  initialResult: DocumentLibraryQueryResult;
+}): ReactElement {
+  const [queryResult, setQueryResult] = useState<DocumentLibraryQueryResult>(
+    props.initialResult,
+  );
+  const [filters, setFilters] = useState<EditableFilters>(
+    filtersFromState(props.initialResult.document_library_state.library),
+  );
+  const [query, setQuery] = useState(
+    props.initialResult.ask_result?.query ??
+      props.initialResult.search_result?.query ??
+      "",
+  );
+  const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const library = queryResult.document_library_state.library;
+  const tags = library?.tags ?? [];
+  const hits = queryResult.search_result?.hits ?? queryResult.ask_result?.hits ?? [];
+  const citations = queryResult.ask_result?.citations ?? [];
+
+  async function refreshState(): Promise<void> {
+    setBusy(true);
+    setErrorMessage(null);
+    try {
+      const payload = await props.bridge.get_document_library_state(
+        buildStateArgs(filters),
+      );
+      setQueryResult((current) => ({
+        ...current,
+        document_library_state: payload.document_library_state,
+      }));
+      setStatusMessage("Filters updated.");
+    } catch (error) {
+      setErrorMessage(String(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function clearFilters(): Promise<void> {
+    const cleared: EditableFilters = {
+      tag_ids: [],
+      tag_match_mode: "all",
+      filename_query: "",
+      created_from: "",
+      created_to: "",
+    };
+    setFilters(cleared);
+    setBusy(true);
+    setErrorMessage(null);
+    try {
+      const payload = await props.bridge.get_document_library_state(
+        buildStateArgs(cleared),
+      );
+      setQueryResult((current) => ({
+        ...current,
+        document_library_state: payload.document_library_state,
+      }));
+      setStatusMessage("Filters cleared.");
+    } catch (error) {
+      setErrorMessage(String(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function runQuery(mode: "search" | "ask"): Promise<void> {
+    if (!query.trim()) {
+      setErrorMessage("Enter a query first.");
+      return;
+    }
+
+    setBusy(true);
+    setErrorMessage(null);
+    setStatusMessage(null);
+    try {
+      const payload = await props.bridge.query_document_library(
+        buildQueryArgs(filters, query.trim(), mode),
+      );
+      setQueryResult(payload);
+      setStatusMessage(mode === "ask" ? "Grounded answer ready." : "Search complete.");
+    } catch (error) {
+      setErrorMessage(String(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (!library) {
+    return (
+      <div className="page-shell">
+        <EmptyState
+          title="No library state"
+          body={queryResult.document_library_state.access.message}
+        />
+      </div>
+    );
+  }
+
+  return (
+    <div className="page-shell">
+      <header className="hero">
+        <div>
+          <p className="eyebrow">Document Ask</p>
+          <h1>Search or ask with the same filters</h1>
+          <p className="hero-copy">
+            Narrow the corpus with tags, filename, and created date, then choose
+            between a direct search result list or a grounded answer.
+          </p>
+        </div>
+        <div className="hero-stats">
+          <div className="stat-chip">
+            <strong>{library.library.filtered_document_count}</strong>
+            <span>Eligible docs</span>
+          </div>
+          <div className="stat-chip">
+            <strong>{hits.length}</strong>
+            <span>Current hits</span>
+          </div>
+        </div>
+      </header>
+
+      {statusMessage ? (
+        <StatusBanner tone="success" message={statusMessage} />
+      ) : null}
+      {errorMessage ? <StatusBanner tone="danger" message={errorMessage} /> : null}
+
+      <div className="main-grid ask-layout">
+        <div className="main-column">
+          <FilterPanel
+            title="Keep one filter model for search and ask"
+            tags={tags}
+            filters={filters}
+            setFilters={setFilters}
+            onApply={refreshState}
+            onClear={clearFilters}
+            busy={busy}
+          />
+
+          <section className="panel">
+            <div className="panel-header">
+              <div>
+                <p className="eyebrow">Query</p>
+                <h2>Run search or ask</h2>
+              </div>
+            </div>
+            <label className="field">
+              <span>Question or search text</span>
+              <textarea
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                rows={5}
+                placeholder="What documents mention tag filtering for MVP search?"
+              />
+            </label>
+            <div className="action-row">
+              <button type="button" className="primary-button" onClick={() => runQuery("search")} disabled={busy}>
+                {busy && queryResult.mode === "search" ? "Searching..." : "Search"}
+              </button>
+              <button type="button" className="ghost-button" onClick={() => runQuery("ask")} disabled={busy}>
+                {busy && queryResult.mode === "ask" ? "Asking..." : "Ask"}
+              </button>
+            </div>
+          </section>
+
+          <SearchResultPanel hits={hits} />
+        </div>
+
+        <div className="side-column">
+          <section className="panel">
+            <div className="panel-header">
+              <div>
+                <p className="eyebrow">Answer</p>
+                <h2>Grounded response</h2>
+              </div>
+              <span className="mini-tag">{queryResult.mode}</span>
+            </div>
+            {queryResult.ask_result ? (
+              <>
+                <p className="answer-copy">{queryResult.ask_result.answer}</p>
+                <p className="muted">
+                  Model {queryResult.ask_result.model} • conversation{" "}
+                  {queryResult.ask_result.conversation_id}
+                </p>
+              </>
+            ) : (
+              <EmptyState
+                title="No answer yet"
+                body="Run Ask to get a grounded summary with citations."
+              />
+            )}
+          </section>
+          <CitationList citations={citations} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function HostedLibraryApp(): ReactElement {
+  const [hostContext, setHostContext] = useState<
+    { theme?: "light" | "dark" } | undefined
+  >();
+  const [initialState, setInitialState] =
+    useState<DocumentLibraryStateResult | null>(null);
   const { app, error, isConnected } = useApp({
-    appInfo: IMPLEMENTATION,
+    appInfo: APP_INFO,
     capabilities: {
       availableDisplayModes: ["inline", "fullscreen"],
     },
     onAppCreated: (createdApp) => {
       createdApp.ontoolresult = async (result) => {
-        if (isKnowledgeQueryResult(result.structuredContent)) {
-          setInitialQueryResult(result.structuredContent);
+        if (isDocumentLibraryStateResult(result.structuredContent)) {
+          setInitialState(result.structuredContent);
         }
       };
       createdApp.onhostcontextchanged = (params) => {
         setHostContext((previous) => ({ ...previous, ...params }));
-      };
-      createdApp.onteardown = async () => {
-        setInitialQueryResult(null);
-        return {};
       };
       createdApp.onerror = console.error;
     },
   });
 
   useEffect(() => {
-    if (app) {
-      setHostContext(app.getHostContext());
-    }
-  }, [app]);
+    syncTheme(hostContext?.theme);
+  }, [hostContext?.theme]);
 
   const bridge = useMemo(() => {
-    if (!app || !initialQueryResult) {
+    if (!app || !initialState) {
       return null;
     }
-    return createHostBridge(app, initialQueryResult, hostContext);
-  }, [app, hostContext, initialQueryResult]);
-
-  const hostControls = useMemo(() => {
-    if (!app) {
-      return null;
-    }
-    return createHostControls(app);
-  }, [app]);
+    return createLibraryHostBridge(app, initialState, app.getHostContext());
+  }, [app, initialState]);
 
   if (error) {
     return (
-      <MantineProvider
-        theme={appTheme}
-        cssVariablesResolver={appCssVariablesResolver}
-        forceColorScheme={resolveColorScheme(hostContext)}
-      >
-        <CenteredState
-          title="Unable to connect to the MCP host"
-          body={String(error)}
-        />
-      </MantineProvider>
+      <div className="page-shell">
+        <EmptyState title="Unable to connect" body={String(error)} />
+      </div>
     );
   }
 
-  if (!isConnected || !bridge || !hostControls) {
+  if (!isConnected || !bridge || !initialState) {
     return (
-      <MantineProvider
-        theme={appTheme}
-        cssVariablesResolver={appCssVariablesResolver}
-        forceColorScheme={resolveColorScheme(hostContext)}
-      >
-        <CenteredState
+      <div className="page-shell">
+        <EmptyState
           title="Waiting for the MCP host"
-          body="Open the app through query_knowledge_base to load the initial graph state."
+          body="Open this app through open_document_library to load the initial state."
           loading
         />
-      </MantineProvider>
-    );
-  }
-
-  return (
-    <KnowledgeBaseDesk
-      bridge={bridge}
-      hostControls={hostControls}
-      hostContext={hostContext}
-    />
-  );
-}
-
-function StandaloneKnowledgeBaseDeskApp(): ReactElement {
-  const [hostContext] = useState<McpUiHostContext | undefined>({
-    ...createMockBridge().hostContext,
-    displayMode: "inline",
-  });
-  const bridge = useMemo(() => createMockBridge(hostContext), [hostContext]);
-  const hostControls = useMemo(() => createMockHostControls(), []);
-
-  return (
-    <KnowledgeBaseDesk
-      bridge={bridge}
-      hostControls={hostControls}
-      hostContext={hostContext}
-    />
-  );
-}
-
-function CenteredState(props: {
-  title: string;
-  body: string;
-  loading?: boolean;
-}): ReactElement {
-  return (
-    <div className="centered-shell">
-      <Card className="kb-card centered-card" shadow="sm" radius="lg" withBorder>
-        <Stack align="center">
-          {props.loading ? <Loader color="teal" /> : null}
-          <Title order={2}>{props.title}</Title>
-          <Text ta="center" c="dimmed">
-            {props.body}
-          </Text>
-        </Stack>
-      </Card>
-    </div>
-  );
-}
-
-function KnowledgeBaseDesk(props: {
-  bridge: KnowledgeBaseBridge;
-  hostControls: KnowledgeBaseHostControls;
-  hostContext?: McpUiHostContext;
-}): ReactElement {
-  const initialDeskState = props.bridge.initial_state;
-  const [deskState, setDeskState] = useState<KnowledgeBaseDeskState>(initialDeskState);
-  const [selectionState, setSelectionState] = useState<SelectionState>(
-    buildSelectionState(initialDeskState),
-  );
-  const [queryText, setQueryText] = useState("");
-  const [commandText, setCommandText] = useState("");
-  const [activeTab, setActiveTab] = useState<MainTab>("search");
-  const [fileSearchResult, setFileSearchResult] = useState<KnowledgeFileSearchResult | null>(
-    props.bridge.initial_query_result.file_search_result,
-  );
-  const [branchSearchResult, setBranchSearchResult] =
-    useState<KnowledgeBranchSearchResult | null>(
-      props.bridge.initial_query_result.branch_search_result,
-    );
-  const [chatResult, setChatResult] = useState<KnowledgeChatResult | null>(
-    props.bridge.initial_query_result.chat_result,
-  );
-  const [nodeDetail, setNodeDetail] = useState<KnowledgeNodeDetail | null>(null);
-  const [commandResult, setCommandResult] =
-    useState<KnowledgeBaseCommandResult | null>(null);
-  const [pendingConfirmation, setPendingConfirmation] =
-    useState<PendingCommandResult | null>(null);
-  const [uploadFile, setUploadFile] = useState<File | null>(null);
-  const [uploadTagIds, setUploadTagIds] = useState<string[]>(
-    initialDeskState.knowledge_base?.context.tag_ids ?? [],
-  );
-  const [busyState, setBusyState] = useState<
-    "idle" | "refresh" | "query" | "command" | "upload"
-  >("idle");
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [requestedDisplayMode, setRequestedDisplayMode] =
-    useState<McpUiDisplayMode | null>(null);
-
-  const knowledgeBase = deskState.knowledge_base;
-  const selectedNode =
-    knowledgeBase?.nodes.find((node) => node.id === selectionState.selectedNodeId) ??
-    null;
-  const visibleNodeIds = new Set(knowledgeBase?.context.visible_node_ids ?? []);
-  const scopedNodeIds = knowledgeBase?.context.scoped_node_ids ?? [];
-  const visibleNodes =
-    knowledgeBase?.nodes.filter((node) => visibleNodeIds.has(node.id)) ?? [];
-  const visibleEdges =
-    knowledgeBase?.edges.filter(
-      (edge) =>
-        visibleNodeIds.has(edge.from_node_id) && visibleNodeIds.has(edge.to_node_id),
-    ) ?? [];
-
-  const modelContextMarkdown = useMemo(
-    () =>
-      buildModelContextMarkdown({
-        deskState,
-        selectionState,
-        fileSearchResult,
-        branchSearchResult,
-        chatResult,
-        commandResult,
-      }),
-    [
-      branchSearchResult,
-      chatResult,
-      commandResult,
-      deskState,
-      fileSearchResult,
-      selectionState,
-    ],
-  );
-
-  useEffect(() => {
-    applyDocumentTheme(props.hostContext?.theme ?? "light");
-    if (props.hostContext?.styles?.variables) {
-      applyHostStyleVariables(props.hostContext.styles.variables);
-    }
-    if (props.hostContext?.styles?.css?.fonts) {
-      applyHostFonts(props.hostContext.styles.css.fonts);
-    }
-  }, [props.hostContext]);
-
-  useEffect(() => {
-    if (props.hostContext?.displayMode) {
-      setRequestedDisplayMode(null);
-    }
-  }, [props.hostContext?.displayMode]);
-
-  useEffect(() => {
-    if (!props.hostControls.supportsModelContext) {
-      return;
-    }
-    void props.hostControls.update_model_context(modelContextMarkdown);
-  }, [modelContextMarkdown, props.hostControls]);
-
-  useEffect(() => {
-    if (!selectionState.selectedNodeId) {
-      setNodeDetail(null);
-      return;
-    }
-    if (nodeDetail?.id === selectionState.selectedNodeId) {
-      return;
-    }
-    void refreshNodeDetail(selectionState.selectedNodeId);
-  }, [nodeDetail?.id, selectionState.selectedNodeId]);
-
-  function applyDeskState(nextDeskState: KnowledgeBaseDeskState): void {
-    startTransition(() => {
-      setDeskState(nextDeskState);
-      setSelectionState(buildSelectionState(nextDeskState));
-      if (!nextDeskState.knowledge_base?.context.selected_node_id) {
-        setNodeDetail(null);
-      }
-    });
-  }
-
-  function buildArgs(
-    overrides: Partial<SelectionState> = {},
-  ): {
-    selected_node_id?: string;
-    graph_selection_mode: SelectionState["graphSelectionMode"];
-    tag_ids: string[];
-    tag_match_mode: SelectionState["tagMatchMode"];
-    media_types: string[];
-    include_web: boolean;
-    rewrite_query: boolean;
-    branch_factor: number;
-    depth: number;
-    max_results: number;
-  } {
-    const nextSelectedNodeId =
-      overrides.selectedNodeId !== undefined
-        ? overrides.selectedNodeId
-        : selectionState.selectedNodeId;
-    return {
-      selected_node_id: nextSelectedNodeId ?? undefined,
-      graph_selection_mode:
-        overrides.graphSelectionMode ?? selectionState.graphSelectionMode,
-      tag_ids: overrides.selectedTagIds ?? selectionState.selectedTagIds,
-      tag_match_mode: overrides.tagMatchMode ?? selectionState.tagMatchMode,
-      media_types: overrides.selectedMediaTypes ?? selectionState.selectedMediaTypes,
-      include_web: overrides.includeWeb ?? selectionState.includeWeb,
-      rewrite_query: overrides.rewriteQuery ?? selectionState.rewriteQuery,
-      branch_factor: overrides.branchFactor ?? selectionState.branchFactor,
-      depth: overrides.depth ?? selectionState.depth,
-      max_results: overrides.maxResults ?? selectionState.maxResults,
-    };
-  }
-
-  async function refreshDesk(
-    overrides: Partial<SelectionState> = {},
-  ): Promise<void> {
-    setBusyState("refresh");
-    setErrorMessage(null);
-    try {
-      const requestArgs = buildArgs(overrides);
-      const payload = await props.bridge.get_knowledge_base_info({
-        ...requestArgs,
-        detail_node_id: requestArgs.selected_node_id,
-      });
-      applyDeskState(payload.knowledge_base_state);
-      setNodeDetail(payload.node_detail);
-    } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : String(error));
-    } finally {
-      setBusyState("idle");
-    }
-  }
-
-  async function refreshNodeDetail(nodeId: string): Promise<void> {
-    try {
-      const payload = await props.bridge.get_knowledge_base_info({
-        ...buildArgs(),
-        detail_node_id: nodeId,
-      });
-      applyDeskState(payload.knowledge_base_state);
-      setNodeDetail(payload.node_detail);
-    } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : String(error));
-    }
-  }
-
-  async function runQuery(mode: KnowledgeQueryMode): Promise<void> {
-    setBusyState("query");
-    setErrorMessage(null);
-    try {
-      const payload = await props.bridge.query_knowledge_base({
-        ...buildArgs(),
-        query: queryText,
-        mode,
-      });
-      applyDeskState(payload.knowledge_base_state);
-      if (payload.file_search_result) {
-        setFileSearchResult(payload.file_search_result);
-      }
-      if (payload.branch_search_result) {
-        setBranchSearchResult(payload.branch_search_result);
-      }
-      if (payload.chat_result) {
-        setChatResult(payload.chat_result);
-      }
-    } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : String(error));
-    } finally {
-      setBusyState("idle");
-    }
-  }
-
-  async function executeCommand(): Promise<void> {
-    setBusyState("command");
-    setErrorMessage(null);
-    try {
-      const payload = await props.bridge.run_knowledge_base_command({
-        command: commandText,
-        ...buildArgs(),
-      });
-      applyDeskState(payload.knowledge_base_state);
-      setCommandResult(payload);
-      setPendingConfirmation(payload.pending_confirmation);
-      const nextSelectedNodeId =
-        payload.knowledge_base_state.knowledge_base?.context.selected_node_id ?? null;
-      if (nextSelectedNodeId) {
-        await refreshNodeDetail(nextSelectedNodeId);
-      } else {
-        setNodeDetail(null);
-      }
-    } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : String(error));
-    } finally {
-      setBusyState("idle");
-    }
-  }
-
-  async function confirmCommand(): Promise<void> {
-    if (!pendingConfirmation) {
-      return;
-    }
-    setBusyState("command");
-    setErrorMessage(null);
-    try {
-      const payload = await props.bridge.confirm_knowledge_base_command({
-        token: pendingConfirmation.token,
-        ...buildArgs(),
-      });
-      applyDeskState(payload.knowledge_base_state);
-      setCommandResult(payload);
-      setPendingConfirmation(null);
-      setNodeDetail(null);
-    } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : String(error));
-    } finally {
-      setBusyState("idle");
-    }
-  }
-
-  async function uploadCurrentFile(): Promise<void> {
-    if (!uploadFile) {
-      return;
-    }
-    setBusyState("upload");
-    setErrorMessage(null);
-    try {
-      const payload = await props.bridge.upload_node({
-        file: uploadFile,
-        tag_ids: uploadTagIds,
-      });
-      setUploadFile(null);
-      setCommandResult(null);
-      await refreshDesk({
-        selectedNodeId: payload.node.id,
-        graphSelectionMode: "self",
-      });
-    } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : String(error));
-    } finally {
-      setBusyState("idle");
-    }
-  }
-
-  function handleNodeClick(nodeId: string): void {
-    const nextSelection =
-      selectionState.selectedNodeId === nodeId
-        ? {
-            selectedNodeId: nodeId,
-            graphSelectionMode: nextSelectionMode(
-              selectionState.graphSelectionMode,
-            ),
-          }
-        : {
-            selectedNodeId: nodeId,
-            graphSelectionMode: "self" as const,
-          };
-    void refreshDesk(nextSelection);
-  }
-
-  function focusNode(nodeId: string): void {
-    void refreshDesk({
-      selectedNodeId: nodeId,
-      graphSelectionMode: "self",
-    });
-  }
-
-  function updateTagFilter(nextTagIds: string[]): void {
-    const visibleIds = tagsVisibleIds(
-      knowledgeBase,
-      nextTagIds,
-      selectionState.tagMatchMode,
-    );
-    const shouldClearSelection =
-      selectionState.selectedNodeId !== null &&
-      !visibleIds.has(selectionState.selectedNodeId);
-    void refreshDesk({
-      selectedTagIds: nextTagIds,
-      selectedNodeId: shouldClearSelection ? null : selectionState.selectedNodeId,
-      graphSelectionMode: shouldClearSelection
-        ? "self"
-        : selectionState.graphSelectionMode,
-    });
-  }
-
-  function updateTagMatchMode(nextTagMatchMode: "all" | "any"): void {
-    const visibleIds = tagsVisibleIds(
-      knowledgeBase,
-      selectionState.selectedTagIds,
-      nextTagMatchMode,
-    );
-    const shouldClearSelection =
-      selectionState.selectedNodeId !== null &&
-      !visibleIds.has(selectionState.selectedNodeId);
-    void refreshDesk({
-      tagMatchMode: nextTagMatchMode,
-      selectedNodeId: shouldClearSelection ? null : selectionState.selectedNodeId,
-      graphSelectionMode: shouldClearSelection
-        ? "self"
-        : selectionState.graphSelectionMode,
-    });
-  }
-
-  const hostDisplayMode = props.hostContext?.displayMode ?? "inline";
-
-  return (
-    <MantineProvider
-      theme={appTheme}
-      cssVariablesResolver={appCssVariablesResolver}
-      forceColorScheme={resolveColorScheme(props.hostContext)}
-    >
-      <div className="kb-app-shell" style={extractSafeAreaStyle(props.hostContext)}>
-        <header className="kb-header">
-          <div>
-            <Text className="section-kicker">MCP Knowledge Base Desk</Text>
-            <Title order={1}>Graph-Scoped Retrieval</Title>
-            <Text c="dimmed">
-              {knowledgeBase?.knowledge_base.title ?? "Knowledge Base"} with{" "}
-              {knowledgeBase?.knowledge_base.node_count ?? 0} node(s),{" "}
-              {knowledgeBase?.knowledge_base.edge_count ?? 0} edge(s), and{" "}
-              {knowledgeBase?.knowledge_base.tag_count ?? 0} tag(s).
-            </Text>
-          </div>
-          <Group>
-            <Badge color={deskState.access.status === "active" ? "teal" : "yellow"} variant="light">
-              {deskState.access.status === "active" ? "Access active" : "Pending access"}
-            </Badge>
-            <Badge variant="outline" color="blue">
-              {hostDisplayMode}
-            </Badge>
-            {props.hostControls.supportedDisplayModes.includes("fullscreen") ? (
-              <Button
-                variant="light"
-                onClick={async () => {
-                  setRequestedDisplayMode("fullscreen");
-                  await props.hostControls.request_display_mode("fullscreen");
-                }}
-                loading={requestedDisplayMode === "fullscreen"}
-              >
-                Fullscreen
-              </Button>
-            ) : null}
-          </Group>
-        </header>
-
-        {errorMessage ? (
-          <Alert color="red" title="Something needs attention">
-            {errorMessage}
-          </Alert>
-        ) : null}
-
-        {commandResult ? (
-          <Alert
-            color={commandResult.status === "rejected" ? "red" : "teal"}
-            title="Command result"
-          >
-            {commandResult.message}
-          </Alert>
-        ) : null}
-
-        {pendingConfirmation ? (
-          <Alert color="yellow" title="Confirm destructive command">
-            <Stack gap="sm">
-              <Text>{pendingConfirmation.prompt}</Text>
-              <Group>
-                <Button
-                  color="red"
-                  onClick={() => void confirmCommand()}
-                  loading={busyState === "command"}
-                >
-                  Confirm delete
-                </Button>
-                <Button
-                  variant="default"
-                  onClick={() => setPendingConfirmation(null)}
-                >
-                  Cancel
-                </Button>
-              </Group>
-            </Stack>
-          </Alert>
-        ) : null}
-
-        <div className="desk-layout">
-          <div className="desk-main-column">
-            <GraphCard
-              nodes={visibleNodes}
-              edges={visibleEdges}
-              selectedNodeId={selectionState.selectedNodeId}
-              scopedNodeIds={scopedNodeIds}
-              onNodeClick={handleNodeClick}
-            />
-
-            <Card className="kb-card" shadow="sm" radius="lg" withBorder>
-              <Stack gap="md">
-                <Group justify="space-between" align="flex-start">
-                  <div>
-                    <Text className="section-kicker">Retrieval</Text>
-                    <Title order={3}>Scoped Search and Chat</Title>
-                  </div>
-                  {busyState === "query" ? <Loader size="sm" color="teal" /> : null}
-                </Group>
-                <Textarea
-                  label="Query"
-                  minRows={2}
-                  maxRows={6}
-                  placeholder="Ask a question, search for a phrase, or start a branching search..."
-                  value={queryText}
-                  onChange={(event) => setQueryText(event.currentTarget.value)}
-                />
-                <Group grow align="flex-end">
-                  <Switch
-                    label="Allow web search in chat"
-                    checked={selectionState.includeWeb}
-                    onChange={(event) =>
-                      void refreshDesk({
-                        includeWeb: event.currentTarget.checked,
-                      })
-                    }
-                  />
-                  <Switch
-                    label="Rewrite search queries"
-                    checked={selectionState.rewriteQuery}
-                    onChange={(event) =>
-                      void refreshDesk({
-                        rewriteQuery: event.currentTarget.checked,
-                      })
-                    }
-                  />
-                </Group>
-                <Group grow align="flex-end">
-                  <NumberInput
-                    label="Branch factor"
-                    min={1}
-                    max={6}
-                    value={selectionState.branchFactor}
-                    onChange={(value) =>
-                      void refreshDesk({
-                        branchFactor: normalizeInteger(value, selectionState.branchFactor),
-                      })
-                    }
-                  />
-                  <NumberInput
-                    label="Depth"
-                    min={1}
-                    max={4}
-                    value={selectionState.depth}
-                    onChange={(value) =>
-                      void refreshDesk({
-                        depth: normalizeInteger(value, selectionState.depth),
-                      })
-                    }
-                  />
-                  <NumberInput
-                    label="Max results"
-                    min={1}
-                    max={20}
-                    value={selectionState.maxResults}
-                    onChange={(value) =>
-                      void refreshDesk({
-                        maxResults: normalizeInteger(value, selectionState.maxResults),
-                      })
-                    }
-                  />
-                </Group>
-
-                <Tabs
-                  value={activeTab}
-                  onChange={(value) => setActiveTab((value as MainTab) ?? "search")}
-                >
-                  <Tabs.List>
-                    <Tabs.Tab value="search">File Search</Tabs.Tab>
-                    <Tabs.Tab value="branch">Branch Search</Tabs.Tab>
-                    <Tabs.Tab value="chat">Chat</Tabs.Tab>
-                  </Tabs.List>
-
-                  <Tabs.Panel value="search" pt="md">
-                    <Group justify="space-between">
-                      <Text size="sm" c="dimmed">
-                        Raw vector-store retrieval within the current graph and tag scope.
-                      </Text>
-                      <Button
-                        onClick={() => void runQuery("file_search")}
-                        loading={busyState === "query"}
-                      >
-                        Search
-                      </Button>
-                    </Group>
-                    <Divider my="md" />
-                    <ResultHitList
-                      hits={fileSearchResult?.hits ?? []}
-                      onFocusNode={focusNode}
-                    />
-                  </Tabs.Panel>
-
-                  <Tabs.Panel value="branch" pt="md">
-                    <Group justify="space-between">
-                      <Text size="sm" c="dimmed">
-                        Expand one seed query into complementary branch queries.
-                      </Text>
-                      <Button
-                        onClick={() => void runQuery("branch_search")}
-                        loading={busyState === "query"}
-                      >
-                        Branch search
-                      </Button>
-                    </Group>
-                    <Divider my="md" />
-                    {branchSearchResult?.nodes.length ? (
-                      <Stack gap="sm">
-                        {branchSearchResult.nodes.map((node) => (
-                          <Card key={node.id} className="result-card" withBorder>
-                            <Group justify="space-between" align="flex-start">
-                              <div>
-                                <Text fw={600}>{node.query}</Text>
-                                <Text c="dimmed" size="sm">
-                                  Depth {node.depth}
-                                  {node.rationale ? ` • ${node.rationale}` : ""}
-                                </Text>
-                              </div>
-                              <Badge variant="light" color="blue">
-                                {node.hits.length} hit(s)
-                              </Badge>
-                            </Group>
-                            <ResultHitList hits={node.hits} onFocusNode={focusNode} />
-                          </Card>
-                        ))}
-                      </Stack>
-                    ) : (
-                      <EmptyState
-                        title="No branch search yet"
-                        body="Run a branch search to generate related query branches from the current scope."
-                      />
-                    )}
-                  </Tabs.Panel>
-
-                  <Tabs.Panel value="chat" pt="md">
-                    <Group justify="space-between">
-                      <Text size="sm" c="dimmed">
-                        Ask grounded questions against the selected graph scope.
-                      </Text>
-                      <Button
-                        onClick={() => void runQuery("qa")}
-                        loading={busyState === "query"}
-                      >
-                        Ask
-                      </Button>
-                    </Group>
-                    <Divider my="md" />
-                    {chatResult ? (
-                      <Stack gap="sm">
-                        <Card className="result-card" withBorder>
-                          <Text>{chatResult.answer}</Text>
-                        </Card>
-                        <Group gap="xs">
-                          {chatResult.citations.map((citation) => (
-                            <Badge
-                              key={`${citation.source}:${citation.label}`}
-                              variant="light"
-                              color={citation.source === "web" ? "orange" : "teal"}
-                            >
-                              {citation.label}
-                            </Badge>
-                          ))}
-                        </Group>
-                      </Stack>
-                    ) : (
-                      <EmptyState
-                        title="No chat answer yet"
-                        body="Ask a question to reuse the current graph, tag, and media filters."
-                      />
-                    )}
-                  </Tabs.Panel>
-                </Tabs>
-              </Stack>
-            </Card>
-          </div>
-
-          <div className="desk-side-column">
-            <Card className="kb-card" shadow="sm" radius="lg" withBorder>
-              <Stack gap="md">
-                <div>
-                  <Text className="section-kicker">Mutations</Text>
-                  <Title order={3}>Command Bar</Title>
-                </div>
-                <Textarea
-                  label="Command"
-                  minRows={2}
-                  placeholder="rename the selected node to Retrieval Map"
-                  value={commandText}
-                  onChange={(event) => setCommandText(event.currentTarget.value)}
-                />
-                <Text size="sm" c="dimmed">
-                  Example commands:{" "}
-                  <Code>rename the selected node to X</Code>,{" "}
-                  <Code>add an edge from A to B labeled cites</Code>,{" "}
-                  <Code>create tag research</Code>,{" "}
-                  <Code>delete node Y</Code>.
-                </Text>
-                <Button
-                  onClick={() => void executeCommand()}
-                  loading={busyState === "command"}
-                >
-                  Run command
-                </Button>
-              </Stack>
-            </Card>
-
-            <Card className="kb-card" shadow="sm" radius="lg" withBorder>
-              <Stack gap="md">
-                <div>
-                  <Text className="section-kicker">Upload</Text>
-                  <Title order={3}>Add a Document Node</Title>
-                </div>
-                <FileInput
-                  label="Document"
-                  placeholder="Choose a file"
-                  value={uploadFile}
-                  onChange={setUploadFile}
-                />
-                <MultiSelect
-                  label="Initial tags"
-                  placeholder="Select tags"
-                  value={uploadTagIds}
-                  onChange={setUploadTagIds}
-                  data={(knowledgeBase?.tags ?? []).map((tag) => ({
-                    value: tag.id,
-                    label: tag.name,
-                  }))}
-                />
-                <Button
-                  onClick={() => void uploadCurrentFile()}
-                  disabled={!uploadFile}
-                  loading={busyState === "upload"}
-                >
-                  Upload node
-                </Button>
-              </Stack>
-            </Card>
-
-            <Card className="kb-card" shadow="sm" radius="lg" withBorder>
-              <Stack gap="md">
-                <div>
-                  <Text className="section-kicker">Filters</Text>
-                  <Title order={3}>Graph and Retrieval Scope</Title>
-                </div>
-                <Text size="sm" c="dimmed">
-                  {selectionSummary(knowledgeBase ?? null, selectedNode)}
-                </Text>
-                <Select
-                  label="Tag match mode"
-                  value={selectionState.tagMatchMode}
-                  onChange={(value) =>
-                    updateTagMatchMode((value as "all" | "any") ?? "all")
-                  }
-                  data={[
-                    { value: "all", label: "All selected tags" },
-                    { value: "any", label: "Any selected tag" },
-                  ]}
-                />
-                <MultiSelect
-                  label="Tag filters"
-                  placeholder="Filter visible nodes by tag"
-                  value={selectionState.selectedTagIds}
-                  onChange={updateTagFilter}
-                  data={(knowledgeBase?.tags ?? []).map((tag) => ({
-                    value: tag.id,
-                    label: `${tag.name} (${tag.node_count})`,
-                  }))}
-                />
-                <MultiSelect
-                  label="Media types"
-                  placeholder="Limit retrieval by media type"
-                  value={selectionState.selectedMediaTypes}
-                  onChange={(values) =>
-                    void refreshDesk({ selectedMediaTypes: values })
-                  }
-                  data={[
-                    { value: "text/markdown", label: "Markdown" },
-                    { value: "text/plain", label: "Plain text" },
-                    { value: "image/jpeg", label: "JPEG" },
-                    { value: "image/png", label: "PNG" },
-                    { value: "audio/wav", label: "WAV audio" },
-                    { value: "audio/mpeg", label: "MP3 audio" },
-                    { value: "video/mp4", label: "MP4 video" },
-                  ]}
-                />
-                <Group gap="xs">
-                  <Badge variant="light" color="teal">
-                    {knowledgeBase?.context.visible_node_ids.length ?? 0} visible
-                  </Badge>
-                  <Badge variant="light" color="blue">
-                    {knowledgeBase?.context.scoped_node_ids.length ?? 0} scoped
-                  </Badge>
-                  <Badge variant="outline" color="gray">
-                    {selectionState.graphSelectionMode}
-                  </Badge>
-                </Group>
-              </Stack>
-            </Card>
-
-            <Card className="kb-card" shadow="sm" radius="lg" withBorder>
-              <Stack gap="md">
-                <div>
-                  <Text className="section-kicker">Node</Text>
-                  <Title order={3}>Selected Document Detail</Title>
-                </div>
-                {busyState === "refresh" ? <Loader size="sm" color="teal" /> : null}
-                {nodeDetail ? (
-                  <ScrollArea.Autosize mah={560} type="scroll">
-                    <Stack gap="md">
-                      <div>
-                        <Title order={4}>{nodeDetail.display_title}</Title>
-                        <Text c="dimmed">{nodeDetail.original_filename}</Text>
-                      </div>
-                      <Group gap="xs">
-                        <Badge color={statusColor(nodeDetail.status)} variant="light">
-                          {nodeDetail.status}
-                        </Badge>
-                        <Badge variant="outline" color="blue">
-                          {nodeDetail.media_type}
-                        </Badge>
-                        <Badge variant="outline" color="gray">
-                          {formatBytes(nodeDetail.byte_size)}
-                        </Badge>
-                      </Group>
-                      <Text size="sm">
-                        Created {formatDate(nodeDetail.created_at)} • Updated{" "}
-                        {formatDate(nodeDetail.updated_at)}
-                      </Text>
-                      <Group gap="xs">
-                        {nodeDetail.tags.map((tag) => (
-                          <Badge key={tag.id} variant="light" color="teal">
-                            {tag.name}
-                          </Badge>
-                        ))}
-                      </Group>
-                      <Text size="sm">
-                        {nodeDetail.download_url ? (
-                          <a href={nodeDetail.download_url} target="_blank" rel="noreferrer">
-                            Open original file
-                          </a>
-                        ) : (
-                          "Original file not available."
-                        )}
-                      </Text>
-                      <Divider />
-                      <div>
-                        <Title order={5}>Outgoing edges</Title>
-                        {nodeDetail.outgoing_edges.length ? (
-                          <Stack gap="xs">
-                            {nodeDetail.outgoing_edges.map((edge) => (
-                              <Button
-                                key={edge.id}
-                                variant="subtle"
-                                size="compact-md"
-                                className="inline-button"
-                                onClick={() => focusNode(edge.to_node_id)}
-                              >
-                                {edge.label} → {edge.to_node_title}
-                              </Button>
-                            ))}
-                          </Stack>
-                        ) : (
-                          <Text c="dimmed" size="sm">
-                            No outgoing edges yet.
-                          </Text>
-                        )}
-                      </div>
-                      <div>
-                        <Title order={5}>Incoming edges</Title>
-                        {nodeDetail.incoming_edges.length ? (
-                          <Stack gap="xs">
-                            {nodeDetail.incoming_edges.map((edge) => (
-                              <Button
-                                key={edge.id}
-                                variant="subtle"
-                                size="compact-md"
-                                className="inline-button"
-                                onClick={() => focusNode(edge.from_node_id)}
-                              >
-                                {edge.from_node_title} → {edge.label}
-                              </Button>
-                            ))}
-                          </Stack>
-                        ) : (
-                          <Text c="dimmed" size="sm">
-                            No incoming edges yet.
-                          </Text>
-                        )}
-                      </div>
-                      <div>
-                        <Title order={5}>Derived artifacts</Title>
-                        {nodeDetail.derived_artifacts.length ? (
-                          <Stack gap="sm">
-                            {nodeDetail.derived_artifacts.map((artifact) => (
-                              <Card key={artifact.id} className="artifact-card" withBorder>
-                                <Text fw={600}>{artifact.kind}</Text>
-                                <Text size="sm">{excerpt(artifact.text_content, 420)}</Text>
-                              </Card>
-                            ))}
-                          </Stack>
-                        ) : (
-                          <Text c="dimmed" size="sm">
-                            No derived artifacts available.
-                          </Text>
-                        )}
-                      </div>
-                    </Stack>
-                  </ScrollArea.Autosize>
-                ) : (
-                  <EmptyState
-                    title="No node selected"
-                    body="Click a visible node in the graph to inspect it and cycle its retrieval scope."
-                  />
-                )}
-              </Stack>
-            </Card>
-          </div>
-        </div>
       </div>
-    </MantineProvider>
-  );
+    );
+  }
+
+  return <LibraryScreen bridge={bridge} initialState={initialState} />;
 }
 
-export default function App(): ReactElement {
-  return isStandaloneMode() ? (
-    <StandaloneKnowledgeBaseDeskApp />
-  ) : (
-    <HostedKnowledgeBaseDeskApp />
-  );
+function HostedAskApp(): ReactElement {
+  const [hostContext, setHostContext] = useState<
+    { theme?: "light" | "dark" } | undefined
+  >();
+  const [initialResult, setInitialResult] =
+    useState<DocumentLibraryQueryResult | null>(null);
+  const { app, error, isConnected } = useApp({
+    appInfo: APP_INFO,
+    capabilities: {
+      availableDisplayModes: ["inline", "fullscreen"],
+    },
+    onAppCreated: (createdApp) => {
+      createdApp.ontoolresult = async (result) => {
+        if (isDocumentLibraryQueryResult(result.structuredContent)) {
+          setInitialResult(result.structuredContent);
+        }
+      };
+      createdApp.onhostcontextchanged = (params) => {
+        setHostContext((previous) => ({ ...previous, ...params }));
+      };
+      createdApp.onerror = console.error;
+    },
+  });
+
+  useEffect(() => {
+    syncTheme(hostContext?.theme);
+  }, [hostContext?.theme]);
+
+  const bridge = useMemo(() => {
+    if (!app || !initialResult) {
+      return null;
+    }
+    return createAskHostBridge(app, initialResult, app.getHostContext());
+  }, [app, initialResult]);
+
+  if (error) {
+    return (
+      <div className="page-shell">
+        <EmptyState title="Unable to connect" body={String(error)} />
+      </div>
+    );
+  }
+
+  if (!isConnected || !bridge || !initialResult) {
+    return (
+      <div className="page-shell">
+        <EmptyState
+          title="Waiting for the MCP host"
+          body="Open this app through open_document_ask to load the initial state."
+          loading
+        />
+      </div>
+    );
+  }
+
+  return <AskScreen bridge={bridge} initialResult={initialResult} />;
+}
+
+export function DocumentLibraryRoot(): ReactElement {
+  if (isStandaloneMode()) {
+    syncTheme("light");
+    const bridge = createMockBridge();
+    return <LibraryScreen bridge={bridge} initialState={bridge.initial_library_state!} />;
+  }
+  return <HostedLibraryApp />;
+}
+
+export function DocumentAskRoot(): ReactElement {
+  if (isStandaloneMode()) {
+    syncTheme("light");
+    const bridge = createMockBridge();
+    return <AskScreen bridge={bridge} initialResult={bridge.initial_query_result!} />;
+  }
+  return <HostedAskApp />;
 }

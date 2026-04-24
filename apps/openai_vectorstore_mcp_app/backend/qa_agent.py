@@ -28,7 +28,7 @@ from .settings import AppSettings
 
 
 class KnowledgeBaseQuestionAnswerer:
-    """Agents SDK chat layer for the knowledge-base desk."""
+    """Agents SDK chat layer for the document-library ask experience."""
 
     def __init__(self, settings: AppSettings) -> None:
         self._settings = settings
@@ -63,17 +63,17 @@ class KnowledgeBaseQuestionAnswerer:
             tools.append(WebSearchTool())
 
         agent = Agent(
-            name="knowledge-base-assistant",
+            name="document-library-assistant",
             model=self._settings.openai_agent_model,
             instructions=(
-                "You are the assistant for a personal document knowledge base. "
-                "Always search the indexed knowledge-base documents before answering. "
-                "Use only information grounded in retrieved knowledge-base content unless "
+                "You are the assistant for a personal document library. "
+                "Always search the indexed library documents before answering. "
+                "Use only information grounded in retrieved document content unless "
                 "web search is explicitly available and necessary. "
-                "When web information is used, clearly separate it from knowledge-base facts. "
+                "When web information is used, clearly separate it from library facts. "
                 f"Selected tags: {selected_tags}. "
-                "Reference node titles or original filenames when they help the user navigate back "
-                "to the underlying material."
+                "Reference document titles or original filenames when they help the user navigate "
+                "back to the underlying material."
             ),
             tools=tools,
         )
@@ -100,7 +100,7 @@ class KnowledgeBaseQuestionAnswerer:
         answer = str(result.final_output).strip()
         duration_ms = (perf_counter() - started_at) * 1000
         self._logger.info(
-            "knowledge_base_agent_answered knowledge_base_id=%s conversation_id=%s web=%s search_calls=%s web_calls=%s duration_ms=%.1f",
+            "document_library_agent_answered knowledge_base_id=%s conversation_id=%s web=%s search_calls=%s web_calls=%s duration_ms=%.1f",
             knowledge_base_id,
             conversation_identifier,
             context.include_web,

@@ -1,23 +1,11 @@
-import { defineConfig, type Plugin } from "vite";
+import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import { viteSingleFile } from "vite-plugin-singlefile";
 
-const serveMcpAppAtRoot = (): Plugin => ({
-  name: "serve-mcp-app-at-root",
-  configureServer(server) {
-    server.middlewares.use((request, _response, next) => {
-      if (request.url === "/") {
-        request.url = "/mcp-app.html";
-      }
-
-      next();
-    });
-  },
-});
+const input = process.env.INPUT ?? "library.html";
 
 export default defineConfig({
   plugins: [
-    serveMcpAppAtRoot(),
     react(),
     viteSingleFile({
       useRecommendedBuildConfig: false,
@@ -35,15 +23,13 @@ export default defineConfig({
     chunkSizeWarningLimit: 100000000,
     cssCodeSplit: false,
     outDir: "dist",
-    emptyOutDir: true,
+    emptyOutDir: false,
     sourcemap: "inline",
     minify: false,
     cssMinify: false,
     rollupOptions: {
-      input: "mcp-app.html",
+      input,
       output: {
-        // Match the single-file plugin's intent without using the deprecated
-        // `inlineDynamicImports` option that now warns under Rolldown.
         codeSplitting: false,
       },
     },
