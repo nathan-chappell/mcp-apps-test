@@ -10,9 +10,8 @@ from chatkit.types import Attachment, Page, ThreadItem, ThreadMetadata
 from pydantic import TypeAdapter
 from sqlalchemy import delete, func, select
 
-from .clerk import ClerkAuthService
 from .db import DatabaseManager
-from .knowledge_base_service import KnowledgeBaseService
+from .file_library_service import FileLibraryService
 from .models import AppChatAttachment, AppChatEntry, AppChatThread, AppUser
 
 THREAD_ITEM_ADAPTER = TypeAdapter(ThreadItem)
@@ -35,12 +34,10 @@ class FileDeskChatStore(Store[FileDeskChatContext]):
         self,
         *,
         database: DatabaseManager,
-        clerk_auth: ClerkAuthService,
-        legacy_service: KnowledgeBaseService,
+        file_library: FileLibraryService,
     ) -> None:
         self._database = database
-        self._clerk_auth = clerk_auth
-        self._legacy = legacy_service
+        self._file_library = file_library
 
     def generate_thread_id(self, context: FileDeskChatContext) -> str:
         return f"chat_{uuid4().hex}"
@@ -333,11 +330,7 @@ class FileDeskChatStore(Store[FileDeskChatContext]):
         record.updated_at = datetime.now(UTC)
 
     async def _ensure_app_user(self, session, *, clerk_user_id: str) -> AppUser:
-        existing = await self._legacy._user_by_clerk_id(session, clerk_user_id)
-        if existing is not None:
-            return existing
-        clerk_record = await self._clerk_auth.get_user_record(clerk_user_id)
-        return await self._legacy._upsert_clerk_user(session, clerk_record)
+        return await self._file_library.ensure_app_user(session, clerk_user_id=clerk_user_id)
 
     async def _require_thread_record(self, session, *, thread_id: str, user_id: int) -> AppChatThread:
         record = await session.scalar(

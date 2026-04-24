@@ -3,7 +3,7 @@ export type TagSummary = {
   name: string;
   slug: string;
   color: string | null;
-  node_count: number;
+  file_count: number;
 };
 
 export type DerivedArtifactSummary = {
@@ -12,17 +12,6 @@ export type DerivedArtifactSummary = {
   openai_file_id: string | null;
   text_content: string;
   structured_payload: Record<string, unknown> | unknown[] | null;
-  created_at: string;
-  updated_at: string;
-};
-
-export type EdgeSummary = {
-  id: string;
-  from_node_id: string;
-  to_node_id: string;
-  from_node_title: string;
-  to_node_title: string;
-  label: string;
   created_at: string;
   updated_at: string;
 };
@@ -42,15 +31,11 @@ export type FileSummary = {
   derived_kinds: string[];
   openai_original_file_id: string | null;
   download_url: string | null;
-  outgoing_edge_count: number;
-  incoming_edge_count: number;
 };
 
 export type FileDetail = FileSummary & {
   original_mime_type: string | null;
   derived_artifacts: DerivedArtifactSummary[];
-  outgoing_edges: EdgeSummary[];
-  incoming_edges: EdgeSummary[];
 };
 
 export type FileListResponse = {
@@ -72,7 +57,7 @@ export type UploadSessionResponse = {
 };
 
 export type UploadResponse = {
-  node: FileSummary;
+  file: FileSummary;
 };
 
 export type DeleteFileResponse = {

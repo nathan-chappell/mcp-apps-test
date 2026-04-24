@@ -39,15 +39,12 @@ class AppSettings(BaseSettings):
     chatkit_domain_key: str = "domain_pk_local_file_desk"
 
     openai_agent_model: str = "gpt-5.4-mini"
-    openai_branching_model: str = "gpt-5.4-mini"
     openai_vision_model: str = "gpt-4.1-mini"
     openai_audio_transcription_model: str = "gpt-4o-transcribe-diarize"
-    openai_file_search_max_results: int = 5
     openai_poll_interval_ms: int = 1_000
 
     upload_session_max_age_seconds: int = 900
     asset_download_session_max_age_seconds: int = 900
-    command_confirmation_max_age_seconds: int = 900
 
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
     app_name: str = "openai-file-desk"

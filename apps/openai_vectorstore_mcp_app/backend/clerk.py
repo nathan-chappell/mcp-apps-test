@@ -175,20 +175,12 @@ class ClerkAuthService:
 
     async def _get_jwks(self, *, force_refresh: bool = False) -> dict[str, dict[str, Any]]:
         now = time.time()
-        if (
-            not force_refresh
-            and self._jwks_by_kid
-            and now - self._jwks_cached_at < _JWKS_TTL_SECONDS
-        ):
+        if not force_refresh and self._jwks_by_kid and now - self._jwks_cached_at < _JWKS_TTL_SECONDS:
             return self._jwks_by_kid
 
         async with self._jwks_lock:
             now = time.time()
-            if (
-                not force_refresh
-                and self._jwks_by_kid
-                and now - self._jwks_cached_at < _JWKS_TTL_SECONDS
-            ):
+            if not force_refresh and self._jwks_by_kid and now - self._jwks_cached_at < _JWKS_TTL_SECONDS:
                 return self._jwks_by_kid
 
             response = await self._client.get("/v1/jwks")
@@ -199,9 +191,7 @@ class ClerkAuthService:
                 raise RuntimeError("Clerk JWKS response did not include a key list.")
 
             self._jwks_by_kid = {
-                key["kid"]: key
-                for key in keys
-                if isinstance(key, dict) and isinstance(key.get("kid"), str)
+                key["kid"]: key for key in keys if isinstance(key, dict) and isinstance(key.get("kid"), str)
             }
             self._jwks_cached_at = time.time()
             return self._jwks_by_kid
@@ -226,9 +216,7 @@ class ClerkAuthService:
         first_name = payload.get("first_name")
         last_name = payload.get("last_name")
         full_name = " ".join(
-            part.strip()
-            for part in [first_name, last_name]
-            if isinstance(part, str) and part.strip()
+            part.strip() for part in [first_name, last_name] if isinstance(part, str) and part.strip()
         ).strip()
         if full_name:
             return full_name

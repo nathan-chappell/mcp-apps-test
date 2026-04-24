@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "openai-vectorstore-mcp-app"
 version = "0.1.0"
-description = "Authenticated MCP server and MCP Apps UI for an OpenAI workspace desk."
+description = "Authenticated file desk with a FastMCP app and companion web UI."
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [

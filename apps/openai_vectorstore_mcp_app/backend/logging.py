@@ -18,11 +18,7 @@ def configure_logging(level: str) -> None:
     normalized_level = getattr(logging, level.upper(), logging.INFO)
 
     existing_handler = next(
-        (
-            handler
-            for handler in root_logger.handlers
-            if isinstance(handler, _OpenAIFilesVectorStoreStreamHandler)
-        ),
+        (handler for handler in root_logger.handlers if isinstance(handler, _OpenAIFilesVectorStoreStreamHandler)),
         None,
     )
 

@@ -1,1 +1,1 @@
-"""OpenAI workspace desk MCP server package."""
+"""OpenAI file desk package."""

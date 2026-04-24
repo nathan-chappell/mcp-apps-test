@@ -12,13 +12,13 @@ from openai.types.file_purpose import FilePurpose
 from openai.types.shared_params.comparison_filter import ComparisonFilter
 from openai.types.shared_params.compound_filter import CompoundFilter
 
-from .schemas import BranchExpansion, ImageDescriptionPayload, SearchHit, TagMatchMode
+from .schemas import ImageDescriptionPayload, SearchHit, TagMatchMode
 from .settings import AppSettings
 
 logger = logging.getLogger(__name__)
 
 
-class OpenAIKnowledgeBaseGateway:
+class OpenAIFileLibraryGateway:
     """OpenAI-backed file, search, and multimodal ingestion operations."""
 
     def __init__(self, settings: AppSettings) -> None:
@@ -43,7 +43,7 @@ class OpenAIKnowledgeBaseGateway:
             metadata=metadata,
         )
         self._logger.info(
-            "knowledge_base_vector_store_created vector_store_id=%s name=%s duration_ms=%.1f",
+            "file_library_vector_store_created vector_store_id=%s name=%s duration_ms=%.1f",
             vector_store.id,
             name,
             (perf_counter() - started_at) * 1000,
@@ -60,7 +60,7 @@ class OpenAIKnowledgeBaseGateway:
         with local_path.open("rb") as file_handle:
             file_object = await self._client.files.create(file=file_handle, purpose=purpose)
         self._logger.info(
-            "knowledge_base_original_file_uploaded file_id=%s filename=%s purpose=%s duration_ms=%.1f",
+            "file_library_original_file_uploaded file_id=%s filename=%s purpose=%s duration_ms=%.1f",
             file_object.id,
             file_object.filename,
             purpose,
@@ -97,7 +97,7 @@ class OpenAIKnowledgeBaseGateway:
             temp_path.unlink(missing_ok=True)
 
         self._logger.info(
-            "knowledge_base_text_artifact_attached vector_store_id=%s file_id=%s filename=%s duration_ms=%.1f",
+            "file_library_text_artifact_attached vector_store_id=%s file_id=%s filename=%s duration_ms=%.1f",
             vector_store_id,
             uploaded_file.id,
             filename,
@@ -120,32 +120,12 @@ class OpenAIKnowledgeBaseGateway:
             poll_interval_ms=self._settings.openai_poll_interval_ms,
         )
         self._logger.info(
-            "knowledge_base_existing_file_attached vector_store_id=%s file_id=%s duration_ms=%.1f",
+            "file_library_existing_file_attached vector_store_id=%s file_id=%s duration_ms=%.1f",
             vector_store_id,
             file_id,
             (perf_counter() - started_at) * 1000,
         )
         return file_id
-
-    async def update_vector_store_file_attributes(
-        self,
-        *,
-        vector_store_id: str,
-        file_id: str,
-        attributes: dict[str, str | float | bool],
-    ) -> None:
-        started_at = perf_counter()
-        await self._client.vector_stores.files.update(
-            file_id=file_id,
-            vector_store_id=vector_store_id,
-            attributes=attributes,
-        )
-        self._logger.info(
-            "knowledge_base_file_attributes_updated vector_store_id=%s file_id=%s duration_ms=%.1f",
-            vector_store_id,
-            file_id,
-            (perf_counter() - started_at) * 1000,
-        )
 
     async def describe_image(
         self,
@@ -163,7 +143,7 @@ class OpenAIKnowledgeBaseGateway:
                         {
                             "type": "input_text",
                             "text": (
-                                "Describe this uploaded image for a searchable knowledge base. "
+                                "Describe this uploaded image for a searchable file library. "
                                 "Capture objects, scene, layout, visible text, and practical "
                                 "details a later user might search for."
                             ),
@@ -182,7 +162,7 @@ class OpenAIKnowledgeBaseGateway:
             raise RuntimeError("Expected structured image description output from OpenAI.")
 
         self._logger.info(
-            "knowledge_base_image_described file_id=%s model=%s duration_ms=%.1f",
+            "file_library_image_described file_id=%s model=%s duration_ms=%.1f",
             openai_file_id,
             self._settings.openai_vision_model,
             (perf_counter() - started_at) * 1000,
@@ -214,9 +194,7 @@ class OpenAIKnowledgeBaseGateway:
             }
             for segment in transcription.segments
         ]
-        searchable_text = "\n".join(
-            f"[{segment['speaker']}] {segment['text']}" for segment in segments
-        ).strip()
+        searchable_text = "\n".join(f"[{segment['speaker']}] {segment['text']}" for segment in segments).strip()
         payload: dict[str, object] = {
             "duration": transcription.duration,
             "task": transcription.task,
@@ -224,7 +202,7 @@ class OpenAIKnowledgeBaseGateway:
             "segments": segments,
         }
         self._logger.info(
-            "knowledge_base_audio_transcribed filename=%s model=%s segments=%s duration_ms=%.1f",
+            "file_library_audio_transcribed filename=%s model=%s segments=%s duration_ms=%.1f",
             local_path.name,
             self._settings.openai_audio_transcription_model,
             len(segments),
@@ -246,7 +224,7 @@ class OpenAIKnowledgeBaseGateway:
 
         payload["video_filename"] = local_path.name
         self._logger.info(
-            "knowledge_base_video_transcribed filename=%s duration_ms=%.1f",
+            "file_library_video_transcribed filename=%s duration_ms=%.1f",
             local_path.name,
             (perf_counter() - started_at) * 1000,
         )
@@ -271,7 +249,7 @@ class OpenAIKnowledgeBaseGateway:
         )
         hits = [SearchHit.from_openai(search_result) for search_result in page.data]
         self._logger.info(
-            "knowledge_base_vector_store_search vector_store_id=%s query=%s hits=%s duration_ms=%.1f",
+            "file_library_vector_store_search vector_store_id=%s query=%s hits=%s duration_ms=%.1f",
             vector_store_id,
             query,
             len(hits),
@@ -279,69 +257,11 @@ class OpenAIKnowledgeBaseGateway:
         )
         return hits
 
-    async def expand_branch_queries(
-        self,
-        *,
-        query: str,
-        branch_factor: int,
-        tag_names: list[str],
-        hit_snippets: list[str],
-    ) -> BranchExpansion:
-        started_at = perf_counter()
-        prompt_lines = [
-            "Generate complementary follow-up search queries for a knowledge-base corpus.",
-            f"Seed query: {query}",
-            f"Maximum children: {branch_factor}",
-        ]
-        if tag_names:
-            prompt_lines.append(f"Selected tags: {', '.join(tag_names)}")
-        if hit_snippets:
-            prompt_lines.append("Relevant retrieved snippets:")
-            prompt_lines.extend(f"- {snippet}" for snippet in hit_snippets[:4])
-
-        try:
-            response = await self._client.responses.parse(
-                model=self._settings.openai_branching_model,
-                text_format=BranchExpansion,
-                temperature=0.2,
-                max_output_tokens=350,
-                input="\n".join(prompt_lines),
-            )
-            parsed = response.output_parsed
-            if parsed is None:
-                raise RuntimeError("OpenAI returned no parsed branching response.")
-            queries = _dedupe_queries(parsed.queries)[:branch_factor]
-            result = BranchExpansion(rationale=parsed.rationale, queries=queries)
-        except Exception:
-            logger.warning(
-                "knowledge_base_branch_expansion_fallback query=%s model=%s",
-                query,
-                self._settings.openai_branching_model,
-                exc_info=True,
-            )
-            result = BranchExpansion(
-                rationale="Local fallback query diversification.",
-                queries=_fallback_branch_queries(
-                    query=query,
-                    branch_factor=branch_factor,
-                    tag_names=tag_names,
-                    hit_snippets=hit_snippets,
-                ),
-            )
-
-        self._logger.info(
-            "knowledge_base_branch_expanded query=%s children=%s duration_ms=%.1f",
-            query,
-            len(result.queries),
-            (perf_counter() - started_at) * 1000,
-        )
-        return result
-
     async def delete_file(self, *, file_id: str) -> None:
         started_at = perf_counter()
         await self._client.files.delete(file_id)
         self._logger.info(
-            "knowledge_base_file_deleted file_id=%s duration_ms=%.1f",
+            "file_library_file_deleted file_id=%s duration_ms=%.1f",
             file_id,
             (perf_counter() - started_at) * 1000,
         )
@@ -351,7 +271,7 @@ class OpenAIKnowledgeBaseGateway:
         response = await self._client.files.content(file_id)
         content = response.content
         self._logger.info(
-            "knowledge_base_file_read file_id=%s bytes=%s duration_ms=%.1f",
+            "file_library_file_read file_id=%s bytes=%s duration_ms=%.1f",
             file_id,
             len(content),
             (perf_counter() - started_at) * 1000,
@@ -402,17 +322,17 @@ def guess_media_type(local_path: Path, declared_media_type: str | None) -> str:
 
 def build_filter_groups(
     *,
-    node_ids: list[str],
+    file_ids: list[str],
     media_types: list[str],
     tag_slugs: list[str],
     tag_match_mode: TagMatchMode,
 ) -> ComparisonFilter | CompoundFilter | None:
     groups: list[ComparisonFilter | CompoundFilter] = []
-    if node_ids:
+    if file_ids:
         groups.append(
-            _or_group("node_id", node_ids)
-            if len(node_ids) > 1
-            else {"type": "eq", "key": "node_id", "value": node_ids[0]}
+            _or_group("file_id", file_ids)
+            if len(file_ids) > 1
+            else {"type": "eq", "key": "file_id", "value": file_ids[0]}
         )
     if media_types:
         groups.append(
@@ -443,9 +363,9 @@ def build_filter_groups(
 
 def build_searchable_attributes(
     *,
-    knowledge_base_id: str,
-    node_id: str,
-    node_title: str,
+    file_library_id: str,
+    file_id: str,
+    file_title: str,
     derived_artifact_id: str | None,
     source_kind: str,
     media_type: str,
@@ -456,9 +376,9 @@ def build_searchable_attributes(
     tag_slugs: list[str],
 ) -> dict[str, str | float | bool]:
     attributes: dict[str, str | float | bool] = {
-        "knowledge_base_id": knowledge_base_id,
-        "node_id": node_id,
-        "node_title": node_title,
+        "file_library_id": file_library_id,
+        "file_id": file_id,
+        "file_title": file_title,
         "source_kind": source_kind,
         "media_type": media_type,
         "derived_kind": derived_kind,
@@ -479,32 +399,3 @@ def _or_group(key: str, values: list[str]) -> CompoundFilter:
         "type": "or",
         "filters": [{"type": "eq", "key": key, "value": value} for value in values],
     }
-
-
-def _dedupe_queries(queries: list[str]) -> list[str]:
-    return list(dict.fromkeys(query.strip() for query in queries if query.strip()))
-
-
-def _fallback_branch_queries(
-    *,
-    query: str,
-    branch_factor: int,
-    tag_names: list[str],
-    hit_snippets: list[str],
-) -> list[str]:
-    lower_terms = [term for term in query.lower().split() if len(term) > 3]
-    children: list[str] = []
-    for tag_name in tag_names:
-        children.append(f"{query} {tag_name}")
-    for term in lower_terms:
-        children.append(f"{query} {term} details")
-    for snippet in hit_snippets[:4]:
-        snippet_terms = [
-            part.strip(".,:;!?()[]{}").lower()
-            for part in snippet.split()
-            if len(part.strip(".,:;!?()[]{}")) > 5
-        ]
-        if snippet_terms:
-            children.append(f"{query} {snippet_terms[0]}")
-    deduped = _dedupe_queries(children)
-    return deduped[:branch_factor]

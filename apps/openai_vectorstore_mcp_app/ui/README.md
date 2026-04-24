@@ -1,34 +1,27 @@
-# Knowledge Base Desk UI
+# File Desk UI
 
-This subproject contains the MCP Apps UI for the knowledge-base graph server.
+This subproject contains the companion React web app for the file desk.
 
 ## Commands
 
 - `npm install`
 - `npm run dev`
-- `npm run dev:mock`
 - `npm run build:watch`
-- `npm run host:build`
 - `npm run typecheck`
 - `npm run build`
 
-## Development modes
+## Scope
 
-- `npm run dev` starts the real local MCP App loop:
-  - the UI single-file build watcher for `dist/mcp-app.html`
-  - the backend-served dev-host asset watchers for `host-dist/dev-host/index.html` and `host-dist/dev-host/sandbox.html`
-  - the Python FastMCP server over streamable HTTP at `http://localhost:8000/mcp`
-  - the host UI at `http://localhost:8000/`
-- `npm run dev:mock` keeps a standalone Vite mode with mock knowledge-base graph data on `http://localhost:5174/`.
-- `npm run build:watch` keeps both `dist/mcp-app.html` and the backend-served dev-host assets fresh.
-- `npm run host:build` builds only the dev-host assets into `host-dist/` without starting any long-running processes.
+- Clerk-authenticated file explorer
+- File upload, delete, and detail views backed by `/api`
+- ChatKit client that talks to `/api/chatkit`
+- A secondary/demo surface that mirrors the same file-library domain used by the MCP app
 
-If Clerk shows a local deployment or allowed-origin warning, make sure you open the bundled host on `http://localhost:8000/` and keep Clerk configured for `localhost`.
+## Local Development
 
-## Current scope
+1. Run `npm install`.
+2. Run `npm run build:watch`.
+3. Start the backend HTTP app from the repo root with `./.venv/bin/openai-vectorstore-mcp-http`.
+4. Open `http://localhost:8000/`.
 
-- View the per-user document graph rendered with Mermaid
-- Filter visible nodes by tags and retrieval by graph scope, tags, and media type
-- Upload and inspect documents, images, audio, and video
-- Run raw file search, branching search, and chat against the current scope
-- Execute graph mutations from the command bar, with confirmation for destructive deletes
+The built assets are served by the backend FastAPI app from the configured static directory.

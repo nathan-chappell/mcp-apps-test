@@ -287,7 +287,7 @@ function Workspace({ userLabel }: { userLabel: string }) {
                   }}
                 >
                   {tag.name}
-                  <span>{tag.node_count}</span>
+                  <span>{tag.file_count}</span>
                 </button>
               ))}
             </div>

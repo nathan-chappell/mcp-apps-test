@@ -3,8 +3,9 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+from .bootstrap import create_services
 from .logging import configure_logging
-from .server import create_mcp_server, create_services
+from .mcp_app import create_mcp_server
 from .settings import get_settings
 
 

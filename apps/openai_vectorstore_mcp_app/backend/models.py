@@ -35,20 +35,20 @@ class AppUser(Base):
         server_default=func.now(),
     )
 
-    knowledge_base: Mapped["KnowledgeBase | None"] = relationship(
+    file_library: Mapped["FileLibrary | None"] = relationship(
         back_populates="owner",
         uselist=False,
     )
-    created_nodes: Mapped[list["KnowledgeNode"]] = relationship(back_populates="created_by")
+    uploaded_files: Mapped[list["LibraryFile"]] = relationship(back_populates="uploaded_by")
     chat_threads: Mapped[list["AppChatThread"]] = relationship(back_populates="user")
     chat_attachments: Mapped[list["AppChatAttachment"]] = relationship(back_populates="user")
 
 
-class KnowledgeBase(Base):
-    __tablename__ = "knowledge_base"
+class FileLibrary(Base):
+    __tablename__ = "file_library"
     __table_args__ = (
-        UniqueConstraint("user_id", name="uq_knowledge_base_user_id"),
-        Index("ix_knowledge_base_user_id_updated_at", "user_id", "updated_at"),
+        UniqueConstraint("user_id", name="uq_file_library_user_id"),
+        Index("ix_file_library_user_id_updated_at", "user_id", "updated_at"),
     )
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
@@ -61,7 +61,6 @@ class KnowledgeBase(Base):
         unique=True,
         index=True,
     )
-    openai_conversation_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -73,31 +72,27 @@ class KnowledgeBase(Base):
         server_default=func.now(),
     )
 
-    owner: Mapped[AppUser] = relationship(back_populates="knowledge_base")
-    nodes: Mapped[list["KnowledgeNode"]] = relationship(
-        back_populates="knowledge_base",
+    owner: Mapped[AppUser] = relationship(back_populates="file_library")
+    files: Mapped[list["LibraryFile"]] = relationship(
+        back_populates="file_library",
         cascade="all, delete-orphan",
     )
-    tags: Mapped[list["KnowledgeTag"]] = relationship(
-        back_populates="knowledge_base",
-        cascade="all, delete-orphan",
-    )
-    edges: Mapped[list["KnowledgeEdge"]] = relationship(
-        back_populates="knowledge_base",
+    tags: Mapped[list["FileTag"]] = relationship(
+        back_populates="file_library",
         cascade="all, delete-orphan",
     )
 
 
-class KnowledgeTag(Base):
-    __tablename__ = "knowledge_tag"
+class FileTag(Base):
+    __tablename__ = "file_tag"
     __table_args__ = (
-        UniqueConstraint("knowledge_base_id", "slug", name="uq_knowledge_tag_slug"),
-        UniqueConstraint("knowledge_base_id", "name", name="uq_knowledge_tag_name"),
+        UniqueConstraint("file_library_id", "slug", name="uq_file_tag_slug"),
+        UniqueConstraint("file_library_id", "name", name="uq_file_tag_name"),
     )
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
-    knowledge_base_id: Mapped[str] = mapped_column(
-        ForeignKey("knowledge_base.id"),
+    file_library_id: Mapped[str] = mapped_column(
+        ForeignKey("file_library.id"),
         nullable=False,
         index=True,
     )
@@ -110,36 +105,36 @@ class KnowledgeTag(Base):
         server_default=func.now(),
     )
 
-    knowledge_base: Mapped[KnowledgeBase] = relationship(back_populates="tags")
-    node_links: Mapped[list["KnowledgeNodeTag"]] = relationship(
+    file_library: Mapped[FileLibrary] = relationship(back_populates="tags")
+    file_links: Mapped[list["FileTagLink"]] = relationship(
         back_populates="tag",
         cascade="all, delete-orphan",
     )
 
 
-class KnowledgeNode(Base):
-    __tablename__ = "knowledge_node"
+class LibraryFile(Base):
+    __tablename__ = "library_file"
     __table_args__ = (
         Index(
-            "ix_knowledge_node_kb_status_created_at",
-            "knowledge_base_id",
+            "ix_library_file_library_status_created_at",
+            "file_library_id",
             "status",
             "created_at",
         ),
         UniqueConstraint(
-            "knowledge_base_id",
+            "file_library_id",
             "display_title",
-            name="uq_knowledge_node_display_title",
+            name="uq_library_file_display_title",
         ),
     )
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
-    knowledge_base_id: Mapped[str] = mapped_column(
-        ForeignKey("knowledge_base.id"),
+    file_library_id: Mapped[str] = mapped_column(
+        ForeignKey("file_library.id"),
         nullable=False,
         index=True,
     )
-    created_by_user_id: Mapped[int | None] = mapped_column(
+    uploaded_by_user_id: Mapped[int | None] = mapped_column(
         ForeignKey("app_user.id"),
         nullable=True,
         index=True,
@@ -168,72 +163,15 @@ class KnowledgeNode(Base):
         server_default=func.now(),
     )
 
-    knowledge_base: Mapped[KnowledgeBase] = relationship(back_populates="nodes")
-    created_by: Mapped[AppUser | None] = relationship(back_populates="created_nodes")
+    file_library: Mapped[FileLibrary] = relationship(back_populates="files")
+    uploaded_by: Mapped[AppUser | None] = relationship(back_populates="uploaded_files")
     derived_artifacts: Mapped[list["DerivedArtifact"]] = relationship(
-        back_populates="node",
+        back_populates="library_file",
         cascade="all, delete-orphan",
     )
-    tag_links: Mapped[list["KnowledgeNodeTag"]] = relationship(
-        back_populates="node",
+    tag_links: Mapped[list["FileTagLink"]] = relationship(
+        back_populates="library_file",
         cascade="all, delete-orphan",
-    )
-    outgoing_edges: Mapped[list["KnowledgeEdge"]] = relationship(
-        back_populates="from_node",
-        cascade="all, delete-orphan",
-        foreign_keys="KnowledgeEdge.from_node_id",
-    )
-    incoming_edges: Mapped[list["KnowledgeEdge"]] = relationship(
-        back_populates="to_node",
-        cascade="all, delete-orphan",
-        foreign_keys="KnowledgeEdge.to_node_id",
-    )
-
-
-class KnowledgeEdge(Base):
-    __tablename__ = "knowledge_edge"
-    __table_args__ = (
-        UniqueConstraint("from_node_id", "to_node_id", name="uq_knowledge_edge_nodes"),
-        Index("ix_knowledge_edge_kb_from", "knowledge_base_id", "from_node_id"),
-        Index("ix_knowledge_edge_kb_to", "knowledge_base_id", "to_node_id"),
-    )
-
-    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
-    knowledge_base_id: Mapped[str] = mapped_column(
-        ForeignKey("knowledge_base.id"),
-        nullable=False,
-        index=True,
-    )
-    from_node_id: Mapped[str] = mapped_column(
-        ForeignKey("knowledge_node.id"),
-        nullable=False,
-        index=True,
-    )
-    to_node_id: Mapped[str] = mapped_column(
-        ForeignKey("knowledge_node.id"),
-        nullable=False,
-        index=True,
-    )
-    label: Mapped[str] = mapped_column(String(255), nullable=False)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        nullable=False,
-        server_default=func.now(),
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        nullable=False,
-        server_default=func.now(),
-    )
-
-    knowledge_base: Mapped[KnowledgeBase] = relationship(back_populates="edges")
-    from_node: Mapped[KnowledgeNode] = relationship(
-        back_populates="outgoing_edges",
-        foreign_keys=[from_node_id],
-    )
-    to_node: Mapped[KnowledgeNode] = relationship(
-        back_populates="incoming_edges",
-        foreign_keys=[to_node_id],
     )
 
 
@@ -241,8 +179,8 @@ class DerivedArtifact(Base):
     __tablename__ = "derived_artifact"
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
-    node_id: Mapped[str] = mapped_column(
-        ForeignKey("knowledge_node.id"),
+    file_id: Mapped[str] = mapped_column(
+        ForeignKey("library_file.id"),
         nullable=False,
         index=True,
     )
@@ -264,17 +202,17 @@ class DerivedArtifact(Base):
         server_default=func.now(),
     )
 
-    node: Mapped[KnowledgeNode] = relationship(back_populates="derived_artifacts")
+    library_file: Mapped[LibraryFile] = relationship(back_populates="derived_artifacts")
 
 
-class KnowledgeNodeTag(Base):
-    __tablename__ = "knowledge_node_tag"
+class FileTagLink(Base):
+    __tablename__ = "file_tag_link"
 
-    node_id: Mapped[str] = mapped_column(ForeignKey("knowledge_node.id"), primary_key=True)
-    tag_id: Mapped[str] = mapped_column(ForeignKey("knowledge_tag.id"), primary_key=True)
+    file_id: Mapped[str] = mapped_column(ForeignKey("library_file.id"), primary_key=True)
+    tag_id: Mapped[str] = mapped_column(ForeignKey("file_tag.id"), primary_key=True)
 
-    node: Mapped[KnowledgeNode] = relationship(back_populates="tag_links")
-    tag: Mapped[KnowledgeTag] = relationship(back_populates="node_links")
+    library_file: Mapped[LibraryFile] = relationship(back_populates="tag_links")
+    tag: Mapped[FileTag] = relationship(back_populates="file_links")
 
 
 class AppChatThread(Base):

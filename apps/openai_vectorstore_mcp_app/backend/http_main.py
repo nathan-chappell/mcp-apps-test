@@ -7,8 +7,8 @@ from urllib.parse import urlparse
 import uvicorn
 
 from .logging import configure_logging
-from .server import create_fastapi_app
 from .settings import get_settings
+from .web_app import create_fastapi_app
 
 
 def main() -> None:

@@ -15,12 +15,12 @@ from apps.openai_vectorstore_mcp_app.backend.db import DatabaseManager
 from apps.openai_vectorstore_mcp_app.backend.models import (
     AppUser,
     DerivedArtifact,
-    KnowledgeBase,
-    KnowledgeNode,
-    KnowledgeNodeTag,
-    KnowledgeTag,
+    FileLibrary,
+    FileTag,
+    FileTagLink,
+    LibraryFile,
 )
-from apps.openai_vectorstore_mcp_app.backend.server import (
+from apps.openai_vectorstore_mcp_app.backend import (
     create_fastapi_app,
     create_mcp_server,
     create_services,
@@ -72,7 +72,7 @@ async def test_mcp_server_exposes_file_desk_tools(configured_settings: AppSettin
         "list_files",
         "list_tags",
         "search_files",
-        "get_file_details",
+        "get_file_detail",
         "read_file_text",
         "delete_file",
         "open_file_library",
@@ -125,7 +125,7 @@ async def test_fastapi_routes_cover_health_static_files_and_chat(
         get_user_record,
     )
     monkeypatch.setattr(
-        "apps.openai_vectorstore_mcp_app.backend.openai_gateway.OpenAIKnowledgeBaseGateway.delete_file",
+        "apps.openai_vectorstore_mcp_app.backend.file_library_gateway.OpenAIFileLibraryGateway.delete_file",
         delete_file_noop,
     )
     monkeypatch.setattr(
@@ -154,10 +154,16 @@ async def test_fastapi_routes_cover_health_static_files_and_chat(
             payload = files_response.json()
             assert payload["total_count"] == 1
             assert payload["files"][0]["display_title"] == "Alpha Notes"
+            assert "outgoing_edge_count" not in payload["files"][0]
+            assert "incoming_edge_count" not in payload["files"][0]
+            assert "/api/files/node_alpha/content?token=" in payload["files"][0]["download_url"]
 
             detail_response = await client.get("/api/files/node_alpha", headers=headers)
             assert detail_response.status_code == 200
-            assert detail_response.json()["derived_artifacts"][0]["kind"] == "document_text"
+            detail_payload = detail_response.json()
+            assert detail_payload["derived_artifacts"][0]["kind"] == "document_text"
+            assert "outgoing_edges" not in detail_payload
+            assert "incoming_edges" not in detail_payload
 
             tags_response = await client.get("/api/tags", headers=headers)
             assert tags_response.status_code == 200
@@ -195,7 +201,7 @@ async def _seed_file_library(settings: AppSettings) -> None:
         session.add(app_user)
         await session.flush()
 
-        knowledge_base = KnowledgeBase(
+        file_library = FileLibrary(
             id="kb_alpha",
             user_id=app_user.id,
             title="Owner Library",
@@ -204,12 +210,12 @@ async def _seed_file_library(settings: AppSettings) -> None:
             created_at=datetime.now(UTC),
             updated_at=datetime.now(UTC),
         )
-        session.add(knowledge_base)
+        session.add(file_library)
         await session.flush()
 
-        tag = KnowledgeTag(
+        tag = FileTag(
             id="tag_ops",
-            knowledge_base_id=knowledge_base.id,
+            file_library_id=file_library.id,
             name="Operations",
             slug="operations",
             color="#c46a32",
@@ -217,10 +223,10 @@ async def _seed_file_library(settings: AppSettings) -> None:
         )
         session.add(tag)
 
-        node = KnowledgeNode(
+        file_record = LibraryFile(
             id="node_alpha",
-            knowledge_base_id=knowledge_base.id,
-            created_by_user_id=app_user.id,
+            file_library_id=file_library.id,
+            uploaded_by_user_id=app_user.id,
             display_title="Alpha Notes",
             original_filename="alpha-notes.txt",
             media_type="text/plain",
@@ -232,19 +238,19 @@ async def _seed_file_library(settings: AppSettings) -> None:
             created_at=datetime.now(UTC),
             updated_at=datetime.now(UTC),
         )
-        session.add(node)
+        session.add(file_record)
         await session.flush()
 
         session.add(
-            KnowledgeNodeTag(
-                node_id=node.id,
+            FileTagLink(
+                file_id=file_record.id,
                 tag_id=tag.id,
             )
         )
         session.add(
             DerivedArtifact(
                 id="artifact_alpha",
-                node_id=node.id,
+                file_id=file_record.id,
                 kind="document_text",
                 openai_file_id="artifact_file_alpha",
                 text_content="Alpha notes explain how the file desk should work.",
