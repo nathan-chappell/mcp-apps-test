@@ -14,6 +14,7 @@ htmlcov/
 
 *.log
 logs/
+.local/
 
 node_modules/
 dist/
@@ -21,6 +22,8 @@ host-dist/
 build/
 
 .vscode/*
+!.vscode/launch.json
 
-# Keep local agent/editor MCP registrations out of the repo.
-.codex/config.toml
+# Keep local agent/editor state out of the repo.
+.codex
+.codex/

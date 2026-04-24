@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=80", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "openai-vectorstore-mcp-app"
+version = "0.1.0"
+description = "Authenticated MCP server and MCP Apps UI for an OpenAI workspace desk."
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "aiosqlite",
+    "asyncpg",
+    "colorlog",
+    "debugpy",
+    "httpx",
+    "itsdangerous",
+    "mcp",
+    "openai",
+    "openai-agents",
+    "psycopg[binary]",
+    "pydantic",
+    "pydantic-settings",
+    "python-multipart",
+    "sqlalchemy",
+    "starlette",
+    "uvicorn",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "ruff",
+]
+
+[project.scripts]
+openai-vectorstore-mcp-http = "apps.openai_vectorstore_mcp_app.backend.http_main:main"
+openai-vectorstore-mcp-stdio = "apps.openai_vectorstore_mcp_app.backend.main:main"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["apps*"]

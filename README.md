@@ -1,35 +1,33 @@
-# MCP Apps Test
+# OpenAI Workspace Desk MCP Server
 
-This repo is for experimenting with MCP apps and servers with a bias toward thin, local-first integrations.
+This repo now centers on a single Python MCP server with an MCP Apps UI for a practical workspace RAG demo.
 
-## Repo defaults
+## What It Does
 
-Unless an app documents an exception, use these defaults:
+- Authenticates users with Clerk and gates access with `private_metadata.active` plus `private_metadata.role`.
+- Lets active users create workspaces, define reusable tags, and upload documents, images, audio, and video from the MCP Apps UI.
+- Uses OpenAI Files plus vector stores as the main retrieval layer.
+- Stores derived searchable text for transcripts and image descriptions while preserving links back to the original uploaded asset.
+- Exposes a single UI-entry query tool plus workspace info and mutation helpers, all backed by the same UI state.
 
-- `config + secrets`: load from local environment or local secret handling
-- `ephemeral MCP/session state`: keep in memory only
-- `remote resource state`: treat the upstream service as the source of truth
-- `user-owned local files`: read on demand for tool calls; do not mirror or retain them in app storage
-- `convenience state`: omit durable recent-item history, aliases, saved searches, and similar UX state by default
+## Main Pieces
 
-Remote HTTP support does not by itself justify adding a database, bucket, or other durable app-owned store. Start near-stateless and add persistence only when an app has a concrete need that cannot be handled with request-scoped or in-memory state.
+- Backend MCP server: [`apps/openai_vectorstore_mcp_app/backend`](apps/openai_vectorstore_mcp_app/backend)
+- MCP Apps UI: [`apps/openai_vectorstore_mcp_app/ui`](apps/openai_vectorstore_mcp_app/ui)
+- Integration tests: [`tests/integration/test_openai_vectorstore_mcp_app.py`](tests/integration/test_openai_vectorstore_mcp_app.py)
 
-## Persistence policy
+## Local Development
 
-The repo-wide persistence policy lives in [docs/persistence-policy.md](/home/uphill/programming/py/mcp-apps-test/docs/persistence-policy.md).
+1. Create `.env` values from [`.env.example`](.env.example).
+2. Install Python dependencies into the repo venv.
+3. In [`apps/openai_vectorstore_mcp_app/ui`](apps/openai_vectorstore_mcp_app/ui), run `npm install`.
+4. Run `npm run build:watch` to keep both the MCP app bundle and the backend-served dev-host assets fresh.
+5. Run the MCP server over HTTP with `./.venv/bin/openai-vectorstore-mcp-http`.
+6. Point an MCP Apps-compatible host at `http://localhost:8000/mcp`.
+7. For the bundled local dev host, open `http://localhost:8000/`.
+8. Set `CLERK_PUBLISHABLE_KEY` so the local dev host can sign in and attach a Clerk session token to MCP requests. Use `localhost` for Clerk-backed local sign-in.
 
-Use that document whenever a new MCP app needs to decide:
+## Notes
 
-- what state, if any, the app should own
-- whether the app is still local-first or needs remote multi-user durability
-- which system is the source of truth for files, jobs, or credentials
-
-## Current app
-
-The current OpenAI Files + Vector Store app follows this default model:
-
-- OpenAI is the system of record for uploaded files, vector stores, and retrieval state
-- the MCP server is a thin orchestration layer over OpenAI APIs
-- local files remain user-owned inputs rather than app-owned stored artifacts
-
-See [apps/openai_files_vector_store/README.md](/home/uphill/programming/py/mcp-apps-test/apps/openai_files_vector_store/README.md) for app-specific details.
+- The server bootstraps its SQL schema directly at runtime; there is no migration layer anymore.
+- The only supported product surface is the MCP server plus MCP Apps UI resource, not a standalone web app.
