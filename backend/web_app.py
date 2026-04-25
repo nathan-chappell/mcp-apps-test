@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+import mimetypes
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Literal
@@ -9,7 +10,7 @@ from typing import Literal
 from chatkit.server import StreamingResult
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import RedirectResponse, StreamingResponse
 
 from .bootstrap import create_services
 from .mcp_app import create_mcp_server
@@ -229,14 +230,14 @@ def create_fastapi_app(settings: AppSettings | None = None) -> FastAPI:
         return Response(content=result.json, media_type="application/json")
 
     @app.get("/{full_path:path}")
-    async def spa_entrypoint(full_path: str) -> FileResponse:
+    async def spa_entrypoint(full_path: str) -> Response:
         index_path = static_dir / "index.html"
         if not index_path.exists():
             raise HTTPException(status_code=404, detail="Frontend build not found.")
         candidate = static_dir / full_path
         if full_path and candidate.exists() and candidate.is_file():
-            return FileResponse(candidate)
-        return FileResponse(index_path)
+            return _static_file_response(candidate)
+        return _static_file_response(index_path)
 
     return app
 
@@ -252,3 +253,15 @@ async def _write_upload_to_tempfile(file: UploadFile) -> Path:
             temp_file.write(chunk)
     await file.close()
     return temp_path
+
+
+def _static_file_response(path: Path) -> Response:
+    media_type, encoding = mimetypes.guess_type(path.name)
+    headers: dict[str, str] = {}
+    if encoding:
+        headers["Content-Encoding"] = encoding
+    return Response(
+        content=path.read_bytes(),
+        media_type=media_type or "application/octet-stream",
+        headers=headers,
+    )

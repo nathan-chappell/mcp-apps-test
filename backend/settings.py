@@ -43,6 +43,7 @@ class AppSettings(BaseSettings):
     openai_vision_model: str = "gpt-5.4-mini"
     openai_audio_transcription_model: str = "gpt-4o-transcribe-diarize"
     openai_poll_interval_ms: int = 1_000
+    mcp_client_session_timeout_seconds: float = 60.0
 
     upload_session_max_age_seconds: int = 900
     asset_download_session_max_age_seconds: int = 900

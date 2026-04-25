@@ -334,6 +334,7 @@ class FileDeskChatKitServer(ChatKitServer[FileDeskChatContext]):
                 "httpx_client_factory": httpx_client_factory,
             },
             name="file_desk_mcp",
+            client_session_timeout_seconds=self._settings.mcp_client_session_timeout_seconds,
         )
 
     def _resolve_requested_model(self, *, input_user_message: UserMessageItem | None) -> str:

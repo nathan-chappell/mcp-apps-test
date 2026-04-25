@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+import re
 from typing import Any
 
 from colorlog import ColoredFormatter
@@ -10,6 +11,7 @@ from uvicorn.config import LOGGING_CONFIG as UVICORN_LOGGING_CONFIG
 _FORMAT = "%(log_color)s%(levelname)-8s%(reset)s %(name)s %(message)s"
 _FILE_FORMAT = "%(asctime)s %(levelname)-8s %(name)s %(message)s"
 _LOG_FILE_PATH = Path(__file__).resolve().parent.parent / "tmp" / "logs.txt"
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 
 
 class _OpenAIFilesVectorStoreStreamHandler(logging.StreamHandler):
@@ -18,6 +20,13 @@ class _OpenAIFilesVectorStoreStreamHandler(logging.StreamHandler):
 
 class _OpenAIFilesVectorStoreFileHandler(logging.FileHandler):
     """Marker handler for idempotent logging configuration."""
+
+
+class _AnsiStrippingFormatter(logging.Formatter):
+    """Write plain-text log lines even when traceback rendering includes ANSI escapes."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        return _ANSI_ESCAPE_RE.sub("", super().format(record))
 
 
 def get_log_file_path() -> Path:
@@ -62,7 +71,7 @@ def configure_logging(level: str) -> None:
 
     if existing_file_handler is None:
         file_handler = _OpenAIFilesVectorStoreFileHandler(log_file_path, encoding="utf-8")
-        file_handler.setFormatter(logging.Formatter(_FILE_FORMAT))
+        file_handler.setFormatter(_AnsiStrippingFormatter(_FILE_FORMAT))
         root_logger.addHandler(file_handler)
 
     root_logger.setLevel(normalized_level)
@@ -88,6 +97,7 @@ def build_uvicorn_log_config(level: str) -> dict[str, Any]:
         "formatter": "debug_file",
     }
     config["formatters"]["debug_file"] = {
+        "()": _AnsiStrippingFormatter,
         "format": _FILE_FORMAT,
     }
     config["loggers"]["uvicorn"]["handlers"] = ["default", "debug_file"]

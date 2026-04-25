@@ -354,11 +354,16 @@ class OpenAIFileLibraryGateway:
             if len(normalized_results) >= max_results:
                 break
 
+        trace_refs = extract_openai_trace_refs(response)
         self._logger.info(
-            "file_library_arxiv_search query=%s requested=%s returned=%s duration_ms=%.1f",
+            "file_library_arxiv_search query=%s requested=%s returned=%s response_id=%s response_log_url=%s conversation_id=%s conversation_log_url=%s duration_ms=%.1f",
             query,
             max_results,
             len(normalized_results),
+            trace_refs.response_id,
+            trace_refs.response_log_url,
+            trace_refs.conversation_id,
+            trace_refs.conversation_log_url,
             (perf_counter() - started_at) * 1000,
         )
         return normalized_results
@@ -370,13 +375,13 @@ class OpenAIFileLibraryGateway:
     ) -> DownloadedRemoteFile:
         started_at = perf_counter()
         pdf_url = _canonical_arxiv_pdf_url(paper.pdf_url)
-        filename = _display_filename_from_paper(paper)
         with NamedTemporaryFile(suffix=".pdf", delete=False) as temp_file:
             temp_path = Path(temp_file.name)
 
         try:
             pdf_prefix = bytearray()
             bytes_written = 0
+            content_disposition: str | None = None
             async with self._http_client.stream("GET", pdf_url) as response:
                 response.raise_for_status()
                 content_disposition = response.headers.get("content-disposition")
@@ -395,7 +400,10 @@ class OpenAIFileLibraryGateway:
             if bytes(pdf_prefix) != b"%PDF-":
                 raise RuntimeError("Downloaded arXiv content was not a PDF.")
 
-            resolved_filename = _filename_from_content_disposition(content_disposition) or filename
+            resolved_filename = _preferred_arxiv_download_filename(
+                paper=paper,
+                content_disposition=content_disposition,
+            )
             self._logger.info(
                 "file_library_arxiv_pdf_downloaded arxiv_id=%s filename=%s bytes=%s duration_ms=%.1f",
                 paper.arxiv_id,
@@ -602,10 +610,21 @@ def _arxiv_id_from_url(url: str) -> str:
 
 
 def _display_filename_from_paper(paper: ArxivPaperCandidate) -> str:
-    normalized_title = re.sub(r"[^A-Za-z0-9._-]+", "_", paper.title).strip("._")
+    normalized_title = re.sub(r"[^a-z0-9]+", "-", paper.title.lower()).strip("-")
     if not normalized_title:
-        normalized_title = paper.arxiv_id.replace("/", "_")
+        normalized_title = paper.arxiv_id.lower().replace("/", "-")
     return f"{normalized_title[:120]}.pdf"
+
+
+def _preferred_arxiv_download_filename(
+    *,
+    paper: ArxivPaperCandidate,
+    content_disposition: str | None,
+) -> str:
+    preferred_filename = _display_filename_from_paper(paper)
+    if preferred_filename != ".pdf":
+        return preferred_filename
+    return _filename_from_content_disposition(content_disposition) or f"{paper.arxiv_id.lower().replace('/', '-')}.pdf"
 
 
 def _filename_from_content_disposition(content_disposition: str | None) -> str | None:

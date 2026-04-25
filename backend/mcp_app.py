@@ -48,7 +48,7 @@ from pydantic import BaseModel, Field, create_model
 from .auth import ClerkTokenVerifier, get_current_clerk_access_token
 from .bootstrap import AppServices
 from .clerk import ClerkAuthService
-from .openai_tracing import clear_active_openai_tool_trace_refs, get_active_openai_tool_trace_refs
+from .openai_tracing import OpenAITraceRefs, get_active_openai_tool_trace_refs
 from .schemas import (
     ArxivPaperCandidate,
     DeleteFileResult,
@@ -149,35 +149,42 @@ async def _run_logged_mcp_tool(
     arguments: dict[str, object],
     operation: Awaitable[Any],
 ) -> Any:
-    if get_active_openai_tool_trace_refs() is not None:
-        try:
-            return await operation
-        finally:
-            clear_active_openai_tool_trace_refs()
-
     started_at = perf_counter()
     serialized_arguments = _serialize_for_log(arguments)
+    trace_refs = get_active_openai_tool_trace_refs()
     logger.info(
-        "mcp_tool_started tool=%s clerk_user_id=%s arguments=%s",
+        "mcp_tool_started tool=%s clerk_user_id=%s response_id=%s response_log_url=%s conversation_id=%s conversation_log_url=%s arguments=%s",
         tool_name,
         clerk_user_id,
+        _trace_response_id(trace_refs),
+        _trace_response_log_url(trace_refs),
+        _trace_conversation_id(trace_refs),
+        _trace_conversation_log_url(trace_refs),
         serialized_arguments,
     )
     try:
         result = await operation
     except Exception:
         logger.error(
-            "mcp_tool_failed tool=%s clerk_user_id=%s arguments=%s duration_ms=%.1f",
+            "mcp_tool_failed tool=%s clerk_user_id=%s response_id=%s response_log_url=%s conversation_id=%s conversation_log_url=%s arguments=%s duration_ms=%.1f",
             tool_name,
             clerk_user_id,
+            _trace_response_id(trace_refs),
+            _trace_response_log_url(trace_refs),
+            _trace_conversation_id(trace_refs),
+            _trace_conversation_log_url(trace_refs),
             serialized_arguments,
             (perf_counter() - started_at) * 1000,
         )
         raise
     logger.info(
-        "mcp_tool_completed tool=%s clerk_user_id=%s result=%s duration_ms=%.1f",
+        "mcp_tool_completed tool=%s clerk_user_id=%s response_id=%s response_log_url=%s conversation_id=%s conversation_log_url=%s result=%s duration_ms=%.1f",
         tool_name,
         clerk_user_id,
+        _trace_response_id(trace_refs),
+        _trace_response_log_url(trace_refs),
+        _trace_conversation_id(trace_refs),
+        _trace_conversation_log_url(trace_refs),
         _serialize_for_log(_summarize_mcp_tool_result(result)),
         (perf_counter() - started_at) * 1000,
     )
@@ -535,6 +542,22 @@ def _serialize_for_log(value: object) -> str:
         default=str,
         separators=(",", ":"),
     )
+
+
+def _trace_response_id(trace_refs: OpenAITraceRefs | None) -> str | None:
+    return trace_refs.response_id if trace_refs is not None else None
+
+
+def _trace_response_log_url(trace_refs: OpenAITraceRefs | None) -> str | None:
+    return trace_refs.response_log_url if trace_refs is not None else None
+
+
+def _trace_conversation_id(trace_refs: OpenAITraceRefs | None) -> str | None:
+    return trace_refs.conversation_id if trace_refs is not None else None
+
+
+def _trace_conversation_log_url(trace_refs: OpenAITraceRefs | None) -> str | None:
+    return trace_refs.conversation_log_url if trace_refs is not None else None
 
 
 def _summarize_mcp_tool_result(result: object) -> object:

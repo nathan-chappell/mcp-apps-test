@@ -13,8 +13,13 @@ from chatkit.types import ThreadMetadata, UserMessageItem
 from backend import create_services
 from backend.chat_store import FileDeskChatContext
 from backend.chatkit_server import _ChatRunHooks
+from backend.file_library_gateway import OpenAIFileLibraryGateway
 from backend.mcp_app import create_dev_mcp_server
-from backend.openai_tracing import build_openai_trace_refs
+from backend.openai_tracing import (
+    build_openai_trace_refs,
+    clear_active_openai_tool_trace_refs,
+    set_active_openai_tool_trace_refs,
+)
 from backend.schemas import TagListResponse
 from backend.settings import AppSettings
 
@@ -155,6 +160,38 @@ async def test_chat_server_uses_delta_input_and_persists_openai_trace_metadata(
 
 
 @pytest.mark.asyncio
+async def test_chat_server_uses_extended_mcp_client_session_timeout(
+    configured_settings: AppSettings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    services = create_services(configured_settings)
+    captured_kwargs: dict[str, object] = {}
+
+    class _FakeMCPServer:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            del args
+            captured_kwargs.update(kwargs)
+
+    monkeypatch.setattr("backend.chatkit_server.MCPServerStreamableHttp", _FakeMCPServer)
+    context = FileDeskChatContext(
+        clerk_user_id="user_123",
+        user_email="owner@example.com",
+        display_name="Owner",
+        bearer_token="test-bearer-token",
+        selected_file_ids=[],
+        thread_origin="interactive",
+        request_app=SimpleNamespace(),
+    )
+
+    try:
+        services.chatkit_server._build_mcp_server(context)
+    finally:
+        await services.close()
+
+    assert captured_kwargs["client_session_timeout_seconds"] == configured_settings.mcp_client_session_timeout_seconds
+
+
+@pytest.mark.asyncio
 async def test_chat_run_hooks_log_tool_calls_with_openai_trace_urls(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -220,6 +257,83 @@ async def test_direct_mcp_tool_calls_are_logged(
 
     assert "mcp_tool_started tool=list_tags" in caplog.text
     assert "mcp_tool_completed tool=list_tags" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_chat_driven_mcp_tool_logs_include_openai_trace_urls(
+    configured_settings: AppSettings,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    services = create_services(configured_settings)
+
+    async def fake_list_tags(*, clerk_user_id: str) -> TagListResponse:
+        assert clerk_user_id == "user_123"
+        return TagListResponse(tags=[])
+
+    monkeypatch.setattr(services.file_library, "list_tags", fake_list_tags)
+    monkeypatch.setattr(
+        "backend.mcp_app.get_current_clerk_access_token",
+        lambda: SimpleNamespace(subject="user_123"),
+    )
+
+    server = create_dev_mcp_server(configured_settings, services)
+    caplog.set_level(logging.INFO, logger="backend.mcp_app")
+    set_active_openai_tool_trace_refs(
+        build_openai_trace_refs(
+            response_id="resp_trace",
+            conversation_id="conv_trace",
+        )
+    )
+    try:
+        await server.call_tool("list_tags", {}, run_middleware=False)
+    finally:
+        clear_active_openai_tool_trace_refs()
+        await services.close()
+
+    assert "mcp_tool_started tool=list_tags" in caplog.text
+    assert "mcp_tool_completed tool=list_tags" in caplog.text
+    assert "https://platform.openai.com/logs/resp_trace" in caplog.text
+    assert "https://platform.openai.com/logs/conv_trace" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_gateway_arxiv_search_logs_clickable_openai_trace_urls(
+    configured_settings: AppSettings,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    gateway = OpenAIFileLibraryGateway(configured_settings)
+
+    async def fake_parse(**kwargs: object) -> object:
+        assert kwargs["model"] == configured_settings.openai_agent_model
+        return SimpleNamespace(
+            id="resp_arxiv",
+            conversation=SimpleNamespace(id="conv_arxiv"),
+            output_parsed=SimpleNamespace(
+                papers=[
+                    SimpleNamespace(
+                        title="Attention Is All You Need",
+                        summary="Transformer architecture paper.",
+                        authors=["Ashish Vaswani", "Noam Shazeer"],
+                        url="https://arxiv.org/abs/1706.03762",
+                    )
+                ]
+            ),
+        )
+
+    monkeypatch.setattr(gateway._client.responses, "parse", fake_parse)
+    caplog.set_level(logging.INFO, logger="backend.file_library_gateway")
+    try:
+        results = await gateway.search_arxiv_papers(query="transformers", max_results=3)
+    finally:
+        await gateway.close()
+
+    assert len(results) == 1
+    assert results[0].arxiv_id == "1706.03762"
+    assert "file_library_arxiv_search" in caplog.text
+    assert "https://platform.openai.com/logs/resp_arxiv" in caplog.text
+    assert "https://platform.openai.com/logs/conv_arxiv" in caplog.text
 
 
 def _input_text(item: object) -> str | None:
