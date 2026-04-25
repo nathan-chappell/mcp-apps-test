@@ -22,10 +22,11 @@ def ensure_database_directory(database_url: str) -> None:
     parsed_url = make_url(database_url)
     if parsed_url.get_backend_name() != "sqlite":
         return
-    if parsed_url.database in {None, "", ":memory:"}:
+    database_name = parsed_url.database
+    if database_name is None or database_name in {"", ":memory:"}:
         return
 
-    database_path = Path(parsed_url.database)
+    database_path = Path(database_name)
     if not database_path.is_absolute():
         database_path = (Path.cwd() / database_path).resolve()
     database_path.parent.mkdir(parents=True, exist_ok=True)
@@ -58,6 +59,9 @@ class AsyncSessionAdapter:
 
     async def execute(self, statement: Any) -> Any:
         return self._session.execute(statement)
+
+    async def get(self, entity: Any, ident: Any) -> Any:
+        return self._session.get(entity, ident)
 
     async def commit(self) -> None:
         self._session.commit()

@@ -4,6 +4,8 @@ from typing import Literal, TypedDict, cast
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from .chat_usage import ThreadUsageTotals
+
 
 class ThreadUsageTotalsModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -66,14 +68,14 @@ class ChatMetadataPatch(TypedDict, total=False):
     title: str | None
     openai_conversation_id: str | None
     openai_previous_response_id: str | None
-    usage: ThreadUsageTotalsModel | dict[str, object] | None
+    usage: ThreadUsageTotals | None
 
 
 class AppChatMetadata(TypedDict, total=False):
     title: str
     openai_conversation_id: str
     openai_previous_response_id: str
-    usage: dict[str, object]
+    usage: ThreadUsageTotals
 
 
 class ChatRequestMetadata(TypedDict, total=False):

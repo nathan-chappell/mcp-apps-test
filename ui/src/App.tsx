@@ -1,11 +1,20 @@
-import { useDeferredValue, useEffect, useEffectEvent, useMemo, useRef, useState, startTransition, type ChangeEvent } from "react";
+import { useDeferredValue, useEffect, useEffectEvent, useRef, useState, startTransition, type ChangeEvent } from "react";
 import { SignInButton, UserButton, useAuth, useUser } from "@clerk/react";
 
-import { ApiError, deleteFile, getAuthenticatedUser, getFileDetail, listFiles, listTags, setClerkTokenGetter, uploadFile } from "./api";
+import {
+  ApiError,
+  deleteFile,
+  getAuthenticatedUser,
+  importArxivPaper,
+  listFiles,
+  searchArxiv,
+  setClerkTokenGetter,
+  uploadFile,
+} from "./api";
 import { ChatPane } from "./ChatPane";
-import type { AuthUser, FileDetail, FileSummary, TagSummary } from "./types";
+import type { ArxivPaperCandidate, AuthUser, FileSummary } from "./types";
 
-const PAGE_SIZE = 20;
+const PAGE_SIZE = 30;
 
 export default function App() {
   const { isLoaded, isSignedIn, getToken } = useAuth();
@@ -144,32 +153,20 @@ function Workspace({ userLabel }: { userLabel: string }) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [query, setQuery] = useState("");
   const deferredQuery = useDeferredValue(query);
-  const [tags, setTags] = useState<TagSummary[]>([]);
-  const [selectedTagIds, setSelectedTagIds] = useState<string[]>([]);
   const [files, setFiles] = useState<FileSummary[]>([]);
+  const [isArxivPanelOpen, setIsArxivPanelOpen] = useState(false);
+  const [arxivQuery, setArxivQuery] = useState("");
+  const [arxivResults, setArxivResults] = useState<ArxivPaperCandidate[]>([]);
+  const [isArxivSearching, setIsArxivSearching] = useState(false);
+  const [isArxivImportingId, setIsArxivImportingId] = useState<string | null>(null);
+  const [arxivErrorMessage, setArxivErrorMessage] = useState<string | null>(null);
   const [selectedFileIds, setSelectedFileIds] = useState<string[]>([]);
-  const [activeFileId, setActiveFileId] = useState<string | null>(null);
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
-  const [fileDetail, setFileDetail] = useState<FileDetail | null>(null);
   const [page, setPage] = useState(1);
   const [totalCount, setTotalCount] = useState(0);
   const [isLibraryLoading, setIsLibraryLoading] = useState(true);
-  const [isDetailLoading, setIsDetailLoading] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-
-  const selectedTagKey = useMemo(() => selectedTagIds.join(","), [selectedTagIds]);
-
-  const loadTags = useEffectEvent(async () => {
-    try {
-      const response = await listTags();
-      setTags(response.tags);
-    } catch (error) {
-      if (error instanceof ApiError) {
-        setErrorMessage(error.message);
-      }
-    }
-  });
 
   const loadLibrary = useEffectEvent(async () => {
     setIsLibraryLoading(true);
@@ -177,19 +174,13 @@ function Workspace({ userLabel }: { userLabel: string }) {
     try {
       const response = await listFiles({
         query: deferredQuery || undefined,
-        tagIds: selectedTagIds,
+        sort: "newest",
         page,
         pageSize: PAGE_SIZE,
       });
       setFiles(response.files);
       setTotalCount(response.total_count);
       setSelectedFileIds((current) => current.filter((fileId) => response.files.some((file) => file.id === fileId)));
-      setActiveFileId((current) => {
-        if (current && response.files.some((file) => file.id === current)) {
-          return current;
-        }
-        return response.files[0]?.id ?? null;
-      });
     } catch (error) {
       setFiles([]);
       setTotalCount(0);
@@ -203,42 +194,17 @@ function Workspace({ userLabel }: { userLabel: string }) {
     }
   });
 
-  const loadDetail = useEffectEvent(async () => {
-    if (!activeFileId) {
-      setFileDetail(null);
-      return;
-    }
-    setIsDetailLoading(true);
-    try {
-      setFileDetail(await getFileDetail(activeFileId));
-    } catch (error) {
-      if (error instanceof ApiError) {
-        setErrorMessage(error.message);
-      }
-      setFileDetail(null);
-    } finally {
-      setIsDetailLoading(false);
-    }
-  });
-
-  useEffect(() => {
-    void loadTags();
-  }, []);
-
   useEffect(() => {
     void loadLibrary();
-  }, [deferredQuery, page, selectedTagKey]);
+  }, [deferredQuery, page]);
 
-  useEffect(() => {
-    void loadDetail();
-  }, [activeFileId]);
-
-  function toggleTag(tagId: string): void {
-    startTransition(() => {
+  const refreshLibraryAfterMutation = useEffectEvent(async () => {
+    if (page !== 1) {
       setPage(1);
-      setSelectedTagIds((current) => (current.includes(tagId) ? current.filter((value) => value !== tagId) : [...current, tagId]));
-    });
-  }
+      return;
+    }
+    await loadLibrary();
+  });
 
   function toggleSelectedFile(fileId: string): void {
     setSelectedFileIds((current) => (current.includes(fileId) ? current.filter((value) => value !== fileId) : [...current, fileId]));
@@ -254,9 +220,9 @@ function Workspace({ userLabel }: { userLabel: string }) {
     setErrorMessage(null);
     try {
       for (const file of chosenFiles) {
-        await uploadFile(file, selectedTagIds);
+        await uploadFile(file, []);
       }
-      await Promise.all([loadTags(), loadLibrary()]);
+      await refreshLibraryAfterMutation();
     } catch (error) {
       if (error instanceof ApiError) {
         setErrorMessage(error.message);
@@ -278,7 +244,7 @@ function Workspace({ userLabel }: { userLabel: string }) {
     try {
       await deleteFile(file.id);
       setSelectedFileIds((current) => current.filter((value) => value !== file.id));
-      await Promise.all([loadTags(), loadLibrary()]);
+      await refreshLibraryAfterMutation();
     } catch (error) {
       if (error instanceof ApiError) {
         setErrorMessage(error.message);
@@ -288,8 +254,53 @@ function Workspace({ userLabel }: { userLabel: string }) {
     }
   }
 
+  async function handleArxivSearch(): Promise<void> {
+    const normalizedQuery = arxivQuery.trim();
+    if (!normalizedQuery) {
+      setArxivResults([]);
+      setArxivErrorMessage(null);
+      return;
+    }
+
+    setIsArxivSearching(true);
+    setArxivErrorMessage(null);
+    try {
+      const response = await searchArxiv(normalizedQuery);
+      setArxivResults(response.results);
+    } catch (error) {
+      setArxivResults([]);
+      if (error instanceof ApiError) {
+        setArxivErrorMessage(error.message);
+      } else {
+        setArxivErrorMessage("Could not search arXiv right now.");
+      }
+    } finally {
+      setIsArxivSearching(false);
+    }
+  }
+
+  async function handleArxivImport(paper: ArxivPaperCandidate): Promise<void> {
+    setIsArxivImportingId(paper.arxiv_id);
+    setArxivErrorMessage(null);
+    setErrorMessage(null);
+    try {
+      await importArxivPaper(paper);
+      await refreshLibraryAfterMutation();
+      setIsArxivPanelOpen(false);
+      setArxivQuery("");
+      setArxivResults([]);
+    } catch (error) {
+      if (error instanceof ApiError) {
+        setArxivErrorMessage(error.message);
+      } else {
+        setArxivErrorMessage("Could not import that arXiv paper.");
+      }
+    } finally {
+      setIsArxivImportingId(null);
+    }
+  }
+
   const selectedCount = selectedFileIds.length;
-  const activeFile = files.find((file) => file.id === activeFileId) ?? null;
 
   return (
     <div className="app-shell">
@@ -299,11 +310,18 @@ function Workspace({ userLabel }: { userLabel: string }) {
             <div>
               <p className="eyebrow">File Desk</p>
               <h1>Explorer</h1>
-              <p className="panel-copy">
-                Search the library, keep a few files selected, and send that context straight into the chat on the right.
-              </p>
             </div>
             <div className="explorer-actions">
+              <button
+                className={isArxivPanelOpen ? "ghost-button ghost-button--active" : "ghost-button"}
+                type="button"
+                onClick={() => {
+                  setIsArxivPanelOpen((current) => !current);
+                  setArxivErrorMessage(null);
+                }}
+              >
+                {isArxivPanelOpen ? "Hide arXiv" : "Add arXiv"}
+              </button>
               <button className="ghost-button" type="button" onClick={() => fileInputRef.current?.click()} disabled={isUploading}>
                 {isUploading ? "Uploading..." : "Upload files"}
               </button>
@@ -321,13 +339,95 @@ function Workspace({ userLabel }: { userLabel: string }) {
             }}
           />
 
-          <section className="explorer-card">
-            <label className="field-label" htmlFor="file-search">
-              Search files
-            </label>
+          {errorMessage ? <div className="error-banner">{errorMessage}</div> : null}
+
+          {isArxivPanelOpen ? (
+            <section className="explorer-card arxiv-panel">
+              <div className="section-heading section-heading--tight">
+                <div>
+                  <h2>Add from arXiv</h2>
+                  <p>Search arxiv.org, then import the PDF into your library.</p>
+                </div>
+              </div>
+
+              <form
+                className="arxiv-search-row"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  void handleArxivSearch();
+                }}
+              >
+                <input
+                  className="search-input search-input--flush"
+                  type="search"
+                  value={arxivQuery}
+                  onChange={(event) => setArxivQuery(event.target.value)}
+                  placeholder="Find papers on arxiv.org"
+                />
+                <button className="ghost-button ghost-button--compact" type="submit" disabled={isArxivSearching}>
+                  {isArxivSearching ? "Searching..." : "Search"}
+                </button>
+              </form>
+
+              {arxivErrorMessage ? <div className="error-banner error-banner--compact">{arxivErrorMessage}</div> : null}
+
+              {arxivResults.length ? (
+                <div className="arxiv-results">
+                  {arxivResults.map((paper) => {
+                    const isImporting = isArxivImportingId === paper.arxiv_id;
+                    return (
+                      <article key={paper.arxiv_id} className="arxiv-result">
+                        <div className="arxiv-result__main">
+                          <div className="arxiv-result__title-row">
+                            <h3>{paper.title}</h3>
+                            <span>{paper.arxiv_id}</span>
+                          </div>
+                          {paper.authors.length ? <p className="arxiv-result__authors">{paper.authors.join(", ")}</p> : null}
+                          {paper.summary ? <p className="arxiv-result__summary">{paper.summary}</p> : null}
+                          <div className="arxiv-result__links">
+                            <a href={paper.abs_url} target="_blank" rel="noreferrer">
+                              Abstract
+                            </a>
+                            <a href={paper.pdf_url} target="_blank" rel="noreferrer">
+                              PDF
+                            </a>
+                          </div>
+                        </div>
+                        <button
+                          className="primary-button primary-button--compact"
+                          type="button"
+                          disabled={isImporting}
+                          onClick={() => {
+                            void handleArxivImport(paper);
+                          }}
+                        >
+                          {isImporting ? "Importing..." : "Import"}
+                        </button>
+                      </article>
+                    );
+                  })}
+                </div>
+              ) : arxivQuery.trim() && !isArxivSearching && !arxivErrorMessage ? (
+                <div className="empty-state empty-state--compact">
+                  <p>No arXiv matches yet. Try a broader topic or author name.</p>
+                </div>
+              ) : null}
+            </section>
+          ) : null}
+
+          <div className="explorer-toolbar">
+            <div className="section-heading">
+              <div>
+                <h2>Files</h2>
+                <p>{isLibraryLoading ? "Loading..." : `${totalCount} file${totalCount === 1 ? "" : "s"} in your library`}</p>
+              </div>
+              <div className="section-heading__actions">
+                <div className="selection-pill">{selectedCount} in chat</div>
+              </div>
+            </div>
             <input
               id="file-search"
-              className="search-input"
+              className="search-input search-input--flush"
               type="search"
               value={query}
               onChange={(event) => {
@@ -336,94 +436,78 @@ function Workspace({ userLabel }: { userLabel: string }) {
                   setQuery(event.target.value);
                 });
               }}
-              placeholder="Titles, tags, or extracted text"
+              placeholder="Filter by filename, type, or tag"
             />
-
-            <div className="tag-bar">
-              {tags.map((tag) => (
-                <button
-                  key={tag.id}
-                  className={selectedTagIds.includes(tag.id) ? "tag-chip tag-chip--active" : "tag-chip"}
-                  type="button"
-                  onClick={() => {
-                    toggleTag(tag.id);
-                  }}
-                >
-                  {tag.name}
-                  <span>{tag.file_count}</span>
-                </button>
-              ))}
-            </div>
-          </section>
+          </div>
 
           <section className="explorer-card explorer-card--stretch">
-            <div className="section-heading">
-              <div>
-                <h2>Files</h2>
-                <p>{isLibraryLoading ? "Loading..." : `${totalCount} file${totalCount === 1 ? "" : "s"}`}</p>
-              </div>
-              <div className="selection-pill">{selectedCount} selected</div>
+            <div className="file-list-toolbar">
+              <span>{isLibraryLoading ? "Loading files..." : `Showing ${files.length} of ${totalCount}`}</span>
+              <span>Newest first</span>
             </div>
 
-            {errorMessage ? <div className="error-banner">{errorMessage}</div> : null}
+            <div className="file-table">
+              <div className="file-table__header file-table__grid" aria-hidden="true">
+                <span>Chat</span>
+                <span>Filename</span>
+                <span>Size</span>
+                <span>Added</span>
+                <span>Type</span>
+                <span></span>
+              </div>
 
-            <div className="file-list">
-              {files.map((file) => {
-                const isActive = file.id === activeFileId;
-                const isSelected = selectedFileIds.includes(file.id);
-                return (
-                  <article
-                    key={file.id}
-                    className={isActive ? "file-row file-row--active" : "file-row"}
-                    onClick={() => {
-                      setActiveFileId(file.id);
-                    }}
-                  >
-                    <div className="file-row__top">
-                      <button
-                        className={isSelected ? "select-toggle select-toggle--active" : "select-toggle"}
-                        type="button"
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          toggleSelectedFile(file.id);
-                        }}
-                      >
-                        {isSelected ? "Selected" : "Select"}
-                      </button>
-                      <button
-                        className="delete-link"
-                        type="button"
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          void handleDelete(file);
-                        }}
-                      >
-                        Delete
-                      </button>
-                    </div>
-                    <h3>{file.display_title}</h3>
-                    <p className="file-row__meta">{file.original_filename}</p>
-                    <div className="file-badges">
-                      <span>{file.media_type}</span>
-                      <span>{formatBytes(file.byte_size)}</span>
-                      <span>{file.status}</span>
-                    </div>
-                    {file.tags.length ? (
-                      <div className="file-tags">
-                        {file.tags.map((tag) => (
-                          <span key={tag.id}>{tag.name}</span>
-                        ))}
+              <div className="file-list">
+                {files.map((file) => {
+                  const isSelected = selectedFileIds.includes(file.id);
+                  return (
+                    <article key={file.id} className={isSelected ? "file-row file-row--selected" : "file-row"}>
+                      <div className="file-table__grid">
+                        <button
+                          className={isSelected ? "select-toggle select-toggle--active" : "select-toggle"}
+                          type="button"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            toggleSelectedFile(file.id);
+                          }}
+                        >
+                          {isSelected ? "On" : "Add"}
+                        </button>
+                        <div className="file-row__name" title={file.original_filename}>
+                          <span className="file-row__filename">{file.original_filename}</span>
+                          {file.status !== "ready" ? (
+                            <span className={`status-badge status-badge--${file.status}`}>{file.status}</span>
+                          ) : null}
+                        </div>
+                        <span className="file-cell file-cell--numeric" title={formatBytes(file.byte_size)}>
+                          {formatBytes(file.byte_size)}
+                        </span>
+                        <span className="file-cell" title={formatDate(file.created_at)}>
+                          {formatTableDate(file.created_at)}
+                        </span>
+                        <span className="file-cell" title={file.media_type}>
+                          {formatTypeLabel(file)}
+                        </span>
+                        <button
+                          className="delete-link delete-link--table"
+                          type="button"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            void handleDelete(file);
+                          }}
+                        >
+                          Del
+                        </button>
                       </div>
-                    ) : null}
-                  </article>
-                );
-              })}
-              {!isLibraryLoading && !files.length ? (
-                <div className="empty-state">
-                  <h3>No matching files yet</h3>
-                  <p>Upload a few files or clear your filters to widen the library view.</p>
-                </div>
-              ) : null}
+                    </article>
+                  );
+                })}
+                {!isLibraryLoading && !files.length ? (
+                  <div className="empty-state">
+                    <h3>No matching files yet</h3>
+                    <p>Upload a few files or clear your filters to widen the library view.</p>
+                  </div>
+                ) : null}
+              </div>
             </div>
 
             <div className="pagination-row">
@@ -445,43 +529,6 @@ function Workspace({ userLabel }: { userLabel: string }) {
                 Next
               </button>
             </div>
-          </section>
-
-          <section className="explorer-card preview-card">
-            <div className="section-heading">
-              <div>
-                <h2>Preview</h2>
-                <p>{activeFile ? activeFile.display_title : "Select a file"}</p>
-              </div>
-            </div>
-            {isDetailLoading ? <p className="muted-copy">Loading file detail...</p> : null}
-            {!isDetailLoading && fileDetail ? (
-              <>
-                <div className="detail-grid">
-                  <div>
-                    <span className="detail-label">Type</span>
-                    <strong>{fileDetail.media_type}</strong>
-                  </div>
-                  <div>
-                    <span className="detail-label">Updated</span>
-                    <strong>{formatDate(fileDetail.updated_at)}</strong>
-                  </div>
-                </div>
-                <div className="preview-text">
-                  {fileDetail.derived_artifacts.length
-                    ? fileDetail.derived_artifacts[0].text_content
-                    : "No extracted text is available for this file yet."}
-                </div>
-                {fileDetail.download_url ? (
-                  <a className="download-link" href={fileDetail.download_url} target="_blank" rel="noreferrer">
-                    Download original file
-                  </a>
-                ) : null}
-              </>
-            ) : null}
-            {!isDetailLoading && !fileDetail ? (
-              <p className="muted-copy">Select a file to inspect its extracted text and metadata.</p>
-            ) : null}
           </section>
         </aside>
 
@@ -526,4 +573,32 @@ function formatDate(value: string): string {
   } catch {
     return value;
   }
+}
+
+function formatTableDate(value: string): string {
+  try {
+    return new Intl.DateTimeFormat(undefined, {
+      month: "short",
+      day: "numeric",
+    }).format(new Date(value));
+  } catch {
+    return value;
+  }
+}
+
+function formatTypeLabel(file: FileSummary): string {
+  const lastDot = file.original_filename.lastIndexOf(".");
+  if (lastDot > -1 && lastDot < file.original_filename.length - 1) {
+    const extension = file.original_filename.slice(lastDot + 1).trim();
+    if (extension && extension.length <= 5) {
+      return extension.toUpperCase();
+    }
+  }
+
+  const slashIndex = file.media_type.indexOf("/");
+  if (slashIndex > -1 && slashIndex < file.media_type.length - 1) {
+    return file.media_type.slice(slashIndex + 1).toUpperCase();
+  }
+
+  return file.source_kind.toUpperCase();
 }

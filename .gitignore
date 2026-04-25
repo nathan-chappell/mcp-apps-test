@@ -27,3 +27,5 @@ build/
 # Keep local agent/editor state out of the repo.
 .codex
 .codex/
+
+tmp/

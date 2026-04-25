@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Literal, cast
 from urllib.parse import urlparse
 
 from pydantic import AnyHttpUrl, Field, SecretStr, field_validator
@@ -19,7 +19,7 @@ class AppSettings(BaseSettings):
     app_signing_secret: SecretStr = Field(init=False)
     clerk_issuer_url: AnyHttpUrl = Field(init=False)
 
-    app_base_url: AnyHttpUrl = "http://localhost:8000"
+    app_base_url: AnyHttpUrl = cast(AnyHttpUrl, "http://localhost:8000")
     clerk_domain: str | None = None
     clerk_client_id: str | None = None
     clerk_client_secret: SecretStr | None = None

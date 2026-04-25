@@ -9,14 +9,18 @@ from typing import Literal
 from chatkit.server import StreamingResult
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 
 from .bootstrap import create_services
 from .mcp_app import create_mcp_server
 from .schemas import (
+    ArxivImportRequest,
+    ArxivSearchRequest,
+    ArxivSearchResponse,
     DeleteFileResult,
     FileDetail,
     FileListResponse,
+    FileListOrder,
     TagListResponse,
     UserSummary,
     UploadFinalizeResult,
@@ -49,6 +53,15 @@ def create_fastapi_app(settings: AppSettings | None = None) -> FastAPI:
         allow_headers=["*"],
         expose_headers=["mcp-session-id"],
     )
+
+    @app.api_route("/mcp", methods=["GET", "POST", "DELETE", "HEAD", "OPTIONS"])
+    async def mcp_root_redirect(request: Request) -> RedirectResponse:
+        query_string = request.url.query
+        redirect_target = "/mcp/"
+        if query_string:
+            redirect_target = f"{redirect_target}?{query_string}"
+        return RedirectResponse(url=redirect_target, status_code=status.HTTP_307_TEMPORARY_REDIRECT)
+
     app.mount("/mcp", mcp_http_app)
 
     @app.get("/health")
@@ -73,6 +86,7 @@ def create_fastapi_app(settings: AppSettings | None = None) -> FastAPI:
         query: str | None = Query(default=None, min_length=1),
         tag_ids: list[str] | None = Query(default=None),
         tag_match_mode: Literal["all", "any"] = Query(default="all"),
+        sort_order: FileListOrder = Query(default="newest", alias="sort"),
         page: int = Query(default=1, ge=1),
         page_size: int = Query(default=20, ge=1, le=100),
     ) -> FileListResponse:
@@ -81,6 +95,7 @@ def create_fastapi_app(settings: AppSettings | None = None) -> FastAPI:
             query=query,
             tag_ids=tag_ids or [],
             tag_match_mode=tag_match_mode,
+            sort_order=sort_order,
             page=page,
             page_size=page_size,
         )
@@ -140,6 +155,33 @@ def create_fastapi_app(settings: AppSettings | None = None) -> FastAPI:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
         finally:
             local_path.unlink(missing_ok=True)
+
+    @app.post("/api/imports/arxiv/search")
+    async def search_arxiv_api(
+        payload: ArxivSearchRequest,
+        user: AuthenticatedWebUser = Depends(require_active_web_user),
+    ) -> ArxivSearchResponse:
+        return await services.file_library.search_arxiv_papers(
+            clerk_user_id=user.clerk_user_id,
+            query=payload.query,
+            max_results=payload.max_results,
+        )
+
+    @app.post("/api/imports/arxiv")
+    async def import_arxiv_api(
+        payload: ArxivImportRequest,
+        user: AuthenticatedWebUser = Depends(require_active_web_user),
+    ) -> UploadFinalizeResult:
+        try:
+            return await services.file_library.import_arxiv_paper(
+                clerk_user_id=user.clerk_user_id,
+                paper=payload.paper,
+                tag_ids=payload.tag_ids,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+        except PermissionError as exc:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
 
     @app.get("/api/files/{file_id}/content")
     async def download_file_api(

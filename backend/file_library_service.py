@@ -19,15 +19,19 @@ from .file_library_gateway import (
 )
 from .models import AppUser, DerivedArtifact, FileLibrary, FileTag, FileTagLink, LibraryFile
 from .schemas import (
+    ArxivPaperCandidate,
+    ArxivSearchResponse,
     DeleteFileResult,
     DerivedArtifactSummary,
     FileDetail,
     FileListResponse,
+    FileListOrder,
     SearchBranchLevel,
     SearchBranchResponse,
     FileSummary,
     FileTagSummary,
     SearchHit,
+    StructuredPayload,
     TagListResponse,
     TagMatchMode,
     UploadFinalizeResult,
@@ -75,6 +79,13 @@ TEXT_EXTENSIONS = {
 class ResolvedUser:
     app_user: AppUser
     summary: UserSummary
+
+
+@dataclass(slots=True)
+class SupplementalArtifact:
+    kind: str
+    text_content: str
+    structured_payload: StructuredPayload
 
 
 class FileLibraryService:
@@ -170,6 +181,70 @@ class FileLibraryService:
                 tag_ids=tag_ids,
             )
 
+    async def search_arxiv_papers(
+        self,
+        *,
+        clerk_user_id: str,
+        query: str,
+        max_results: int,
+    ) -> ArxivSearchResponse:
+        normalized_query = query.strip()
+        if not normalized_query:
+            return ArxivSearchResponse(query="", results=[])
+
+        await self._database.ensure_ready()
+        async with self._database.session() as session:
+            resolved_user = await self._resolved_user(session, clerk_user_id=clerk_user_id)
+            self._require_active(resolved_user)
+
+        results = await self._openai_gateway.search_arxiv_papers(
+            query=normalized_query,
+            max_results=max_results,
+        )
+        logger.info(
+            "file_library_arxiv_search clerk_user_id=%s query=%s results=%s",
+            clerk_user_id,
+            normalized_query,
+            len(results),
+        )
+        return ArxivSearchResponse(query=normalized_query, results=results)
+
+    async def import_arxiv_paper(
+        self,
+        *,
+        clerk_user_id: str,
+        paper: ArxivPaperCandidate,
+        tag_ids: list[str],
+    ) -> UploadFinalizeResult:
+        downloaded_file = await self._openai_gateway.download_arxiv_pdf(paper=paper)
+        try:
+            await self._database.ensure_ready()
+            async with self._database.session() as session:
+                resolved_user = await self._resolved_user(session, clerk_user_id=clerk_user_id)
+                self._require_active(resolved_user)
+                file_library = await self._file_library_for_user(session, resolved_user=resolved_user)
+                result = await self._ingest_file(
+                    session,
+                    resolved_user=resolved_user,
+                    file_library=file_library,
+                    local_path=downloaded_file.local_path,
+                    filename=downloaded_file.filename,
+                    declared_media_type=downloaded_file.media_type,
+                    tag_ids=tag_ids,
+                    preferred_display_title=paper.title,
+                    supplemental_artifacts=[build_arxiv_listing_artifact(paper)],
+                )
+        finally:
+            downloaded_file.local_path.unlink(missing_ok=True)
+
+        logger.info(
+            "file_library_arxiv_imported clerk_user_id=%s arxiv_id=%s title=%s",
+            clerk_user_id,
+            paper.arxiv_id,
+            paper.title,
+        )
+        return result
+
     async def list_files(
         self,
         *,
@@ -177,6 +252,7 @@ class FileLibraryService:
         query: str | None,
         tag_ids: list[str],
         tag_match_mode: TagMatchMode,
+        sort_order: FileListOrder,
         page: int,
         page_size: int,
     ) -> FileListResponse:
@@ -195,6 +271,7 @@ class FileLibraryService:
                 query=query,
                 selected_tags=selected_tags,
                 tag_match_mode=tag_match_mode,
+                sort_order=sort_order,
             )
             start = max(page - 1, 0) * page_size
             end = start + page_size
@@ -315,6 +392,7 @@ class FileLibraryService:
                 query=None,
                 selected_tags=selected_tags,
                 tag_match_mode=tag_match_mode,
+                sort_order="newest",
             )
             all_file_ids = {file_record.id for file_record in file_library.files}
             scoped_file_ids = [file_record.id for file_record in matching_files]
@@ -497,6 +575,8 @@ class FileLibraryService:
         filename: str,
         declared_media_type: str | None,
         tag_ids: list[str],
+        preferred_display_title: str | None = None,
+        supplemental_artifacts: list[SupplementalArtifact] | None = None,
     ) -> UploadFinalizeResult:
         await self._ensure_vector_store(session, file_library, resolved_user)
 
@@ -510,7 +590,7 @@ class FileLibraryService:
         display_title = await self._unique_file_title(
             session,
             file_library_id=file_library.id,
-            base_title=Path(filename).stem or filename,
+            base_title=preferred_display_title or Path(filename).stem or filename,
         )
         now = _utcnow()
         file_record = LibraryFile(
@@ -540,6 +620,18 @@ class FileLibraryService:
 
             tag_names = [tag.name for tag in tag_records]
             tag_slugs = [tag.slug for tag in tag_records]
+
+            for supplemental_artifact in supplemental_artifacts or []:
+                await self._store_derived_artifact(
+                    session=session,
+                    file_library=file_library,
+                    file_record=file_record,
+                    kind=supplemental_artifact.kind,
+                    text_content=supplemental_artifact.text_content,
+                    structured_payload=supplemental_artifact.structured_payload,
+                    tag_names=tag_names,
+                    tag_slugs=tag_slugs,
+                )
 
             derived_text = extract_text_document(local_path=local_path, media_type=media_type)
             if source_kind == "image":
@@ -959,15 +1051,12 @@ class FileLibraryService:
         query: str | None,
         selected_tags: list[FileTag],
         tag_match_mode: TagMatchMode,
+        sort_order: FileListOrder,
     ) -> list[LibraryFile]:
         normalized_query = query.strip().lower() if isinstance(query, str) and query.strip() else None
         selected_tag_ids = {tag.id for tag in selected_tags}
         matching_files: list[LibraryFile] = []
-        for file_record in sorted(
-            file_library.files,
-            key=lambda item: (item.updated_at, item.created_at),
-            reverse=True,
-        ):
+        for file_record in self._ordered_files(file_library.files, sort_order=sort_order):
             file_tag_ids = {link.tag_id for link in file_record.tag_links}
             if selected_tag_ids:
                 if tag_match_mode == "all" and not selected_tag_ids.issubset(file_tag_ids):
@@ -987,10 +1076,26 @@ class FileLibraryService:
             file_record.media_type,
             file_record.source_kind,
             *[link.tag.name for link in file_record.tag_links],
-            *[artifact.text_content[:2_000] for artifact in file_record.derived_artifacts],
         ]
         haystack = "\n".join(field for field in fields if field).lower()
         return query in haystack
+
+    @staticmethod
+    def _ordered_files(files: list[LibraryFile], *, sort_order: FileListOrder) -> list[LibraryFile]:
+        if sort_order == "filename":
+            return sorted(
+                files,
+                key=lambda item: (
+                    item.original_filename.lower(),
+                    item.display_title.lower(),
+                    item.created_at,
+                ),
+            )
+        return sorted(
+            files,
+            key=lambda item: (item.created_at, item.updated_at, item.display_title.lower()),
+            reverse=True,
+        )
 
     @staticmethod
     def _branch_query(*, root_query: str, search_hit: SearchHit) -> str:
@@ -1007,6 +1112,21 @@ def build_file_library_title(display_name: str) -> str:
     if normalized.endswith("s"):
         return f"{normalized}' File Library"
     return f"{normalized}'s File Library"
+
+
+def build_arxiv_listing_artifact(paper: ArxivPaperCandidate) -> SupplementalArtifact:
+    lines = [paper.title]
+    if paper.authors:
+        lines.append(f"Authors: {', '.join(paper.authors)}")
+    lines.append(f"Abstract page: {paper.abs_url}")
+    lines.append(f"PDF: {paper.pdf_url}")
+    if paper.summary:
+        lines.extend(["", "Abstract:", paper.summary.strip()])
+    return SupplementalArtifact(
+        kind="arxiv_listing",
+        text_content="\n".join(lines).strip(),
+        structured_payload=paper.model_dump(mode="json"),
+    )
 
 
 def slugify(value: str) -> str:

@@ -1,21 +1,49 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 import logging
 import mimetypes
 from pathlib import Path
+import re
 from tempfile import NamedTemporaryFile
 from time import perf_counter
+from typing import Any, cast
+from urllib.parse import unquote, urlparse
 
+import httpx
 from openai import AsyncOpenAI
 from openai.types.file_purpose import FilePurpose
 from openai.types.shared_params.comparison_filter import ComparisonFilter
 from openai.types.shared_params.compound_filter import CompoundFilter
+from pydantic import BaseModel, Field
 
-from .schemas import ImageDescriptionPayload, SearchHit, TagMatchMode
+from .openai_tracing import extract_openai_trace_refs
+from .schemas import ArxivPaperCandidate, ImageDescriptionPayload, SearchHit, TagMatchMode
 from .settings import AppSettings
 
 logger = logging.getLogger(__name__)
+ARXIV_ALLOWED_HOSTS = {"arxiv.org", "www.arxiv.org"}
+ARXIV_ID_PATTERN = re.compile(r"^[A-Za-z0-9._/-]+$")
+
+
+class _ArxivWebSearchPaper(BaseModel):
+    title: str
+    summary: str = ""
+    authors: list[str] = Field(default_factory=list)
+    url: str
+
+
+class _ArxivWebSearchPayload(BaseModel):
+    papers: list[_ArxivWebSearchPaper] = Field(default_factory=list)
+
+
+@dataclass(slots=True)
+class DownloadedRemoteFile:
+    local_path: Path
+    filename: str
+    media_type: str
+    source_url: str
 
 
 class OpenAIFileLibraryGateway:
@@ -24,10 +52,15 @@ class OpenAIFileLibraryGateway:
     def __init__(self, settings: AppSettings) -> None:
         self._settings = settings
         self._client = AsyncOpenAI(api_key=settings.openai_api_key.get_secret_value())
+        self._http_client = httpx.AsyncClient(
+            follow_redirects=True,
+            timeout=httpx.Timeout(60.0, connect=10.0),
+        )
         self._logger = logging.getLogger(__name__)
 
     async def close(self) -> None:
         await self._client.close()
+        await self._http_client.aclose()
 
     async def create_vector_store(
         self,
@@ -37,11 +70,13 @@ class OpenAIFileLibraryGateway:
         metadata: dict[str, str] | None,
     ) -> str:
         started_at = perf_counter()
-        vector_store = await self._client.vector_stores.create(
-            name=name,
-            description=description,
-            metadata=metadata,
-        )
+        create_arguments: dict[str, object] = {
+            "name": name,
+            "metadata": metadata,
+        }
+        if description is not None:
+            create_arguments["description"] = description
+        vector_store = await cast(Any, self._client.vector_stores.create)(**create_arguments)
         self._logger.info(
             "file_library_vector_store_created vector_store_id=%s name=%s duration_ms=%.1f",
             vector_store.id,
@@ -161,10 +196,15 @@ class OpenAIFileLibraryGateway:
         if parsed is None:
             raise RuntimeError("Expected structured image description output from OpenAI.")
 
+        trace_refs = extract_openai_trace_refs(response)
         self._logger.info(
-            "file_library_image_described file_id=%s model=%s duration_ms=%.1f",
+            "file_library_image_described file_id=%s model=%s response_id=%s response_log_url=%s conversation_id=%s conversation_log_url=%s duration_ms=%.1f",
             openai_file_id,
             self._settings.openai_vision_model,
+            trace_refs.response_id,
+            trace_refs.response_log_url,
+            trace_refs.conversation_id,
+            trace_refs.conversation_log_url,
             (perf_counter() - started_at) * 1000,
         )
         return parsed
@@ -176,7 +216,8 @@ class OpenAIFileLibraryGateway:
     ) -> tuple[str, dict[str, object]]:
         started_at = perf_counter()
         with local_path.open("rb") as file_handle:
-            transcription = await self._client.audio.transcriptions.create(
+            # The SDK runtime accepts newer diarization options than the generated stubs model.
+            transcription = await cast(Any, self._client.audio.transcriptions).create(
                 file=file_handle,
                 model=self._settings.openai_audio_transcription_model,
                 response_format="diarized_json",
@@ -240,13 +281,15 @@ class OpenAIFileLibraryGateway:
         filters: ComparisonFilter | CompoundFilter | None,
     ) -> list[SearchHit]:
         started_at = perf_counter()
-        page = await self._client.vector_stores.search(
-            vector_store_id,
-            query=query,
-            max_num_results=max_results,
-            rewrite_query=rewrite_query,
-            filters=filters,
-        )
+        search_arguments: dict[str, object] = {
+            "vector_store_id": vector_store_id,
+            "query": query,
+            "max_num_results": max_results,
+            "rewrite_query": rewrite_query,
+        }
+        if filters is not None:
+            search_arguments["filters"] = filters
+        page = await cast(Any, self._client.vector_stores.search)(**search_arguments)
         hits = [SearchHit.from_openai(search_result) for search_result in page.data]
         self._logger.info(
             "file_library_vector_store_search vector_store_id=%s query=%s hits=%s duration_ms=%.1f",
@@ -256,6 +299,119 @@ class OpenAIFileLibraryGateway:
             (perf_counter() - started_at) * 1000,
         )
         return hits
+
+    async def search_arxiv_papers(
+        self,
+        *,
+        query: str,
+        max_results: int,
+    ) -> list[ArxivPaperCandidate]:
+        started_at = perf_counter()
+        response = await self._client.responses.parse(
+            model=self._settings.openai_agent_model,
+            text_format=_ArxivWebSearchPayload,
+            include=["web_search_call.action.sources"],
+            tools=[
+                {
+                    "type": "web_search",
+                    "filters": {"allowed_domains": ["arxiv.org"]},
+                    "search_context_size": "medium",
+                }
+            ],
+            input=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": (
+                                "Search arXiv for papers relevant to the user's query. "
+                                f"Return up to {max_results} real papers from arxiv.org only. "
+                                "For each paper, return the exact arXiv abstract page URL in the url field, "
+                                "a concise one-paragraph summary, and author names when available."
+                                f"\n\nQuery: {query}"
+                            ),
+                        }
+                    ],
+                }
+            ],
+        )
+        parsed = response.output_parsed
+        if parsed is None:
+            raise RuntimeError("Expected structured arXiv search output from OpenAI.")
+
+        normalized_results: list[ArxivPaperCandidate] = []
+        seen_ids: set[str] = set()
+        for paper in parsed.papers:
+            try:
+                normalized = _normalize_arxiv_candidate(paper)
+            except ValueError:
+                continue
+            if normalized.arxiv_id in seen_ids:
+                continue
+            seen_ids.add(normalized.arxiv_id)
+            normalized_results.append(normalized)
+            if len(normalized_results) >= max_results:
+                break
+
+        self._logger.info(
+            "file_library_arxiv_search query=%s requested=%s returned=%s duration_ms=%.1f",
+            query,
+            max_results,
+            len(normalized_results),
+            (perf_counter() - started_at) * 1000,
+        )
+        return normalized_results
+
+    async def download_arxiv_pdf(
+        self,
+        *,
+        paper: ArxivPaperCandidate,
+    ) -> DownloadedRemoteFile:
+        started_at = perf_counter()
+        pdf_url = _canonical_arxiv_pdf_url(paper.pdf_url)
+        filename = _display_filename_from_paper(paper)
+        with NamedTemporaryFile(suffix=".pdf", delete=False) as temp_file:
+            temp_path = Path(temp_file.name)
+
+        try:
+            pdf_prefix = bytearray()
+            bytes_written = 0
+            async with self._http_client.stream("GET", pdf_url) as response:
+                response.raise_for_status()
+                content_disposition = response.headers.get("content-disposition")
+                with temp_path.open("wb") as output_file:
+                    async for chunk in response.aiter_bytes():
+                        if not chunk:
+                            continue
+                        if len(pdf_prefix) < 5:
+                            remaining = 5 - len(pdf_prefix)
+                            pdf_prefix.extend(chunk[:remaining])
+                        output_file.write(chunk)
+                        bytes_written += len(chunk)
+
+            if bytes_written == 0:
+                raise RuntimeError("Downloaded arXiv PDF was empty.")
+            if bytes(pdf_prefix) != b"%PDF-":
+                raise RuntimeError("Downloaded arXiv content was not a PDF.")
+
+            resolved_filename = _filename_from_content_disposition(content_disposition) or filename
+            self._logger.info(
+                "file_library_arxiv_pdf_downloaded arxiv_id=%s filename=%s bytes=%s duration_ms=%.1f",
+                paper.arxiv_id,
+                resolved_filename,
+                bytes_written,
+                (perf_counter() - started_at) * 1000,
+            )
+            return DownloadedRemoteFile(
+                local_path=temp_path,
+                filename=resolved_filename,
+                media_type="application/pdf",
+                source_url=pdf_url,
+            )
+        except Exception:
+            temp_path.unlink(missing_ok=True)
+            raise
 
     async def delete_file(self, *, file_id: str) -> None:
         started_at = perf_counter()
@@ -399,3 +555,68 @@ def _or_group(key: str, values: list[str]) -> CompoundFilter:
         "type": "or",
         "filters": [{"type": "eq", "key": key, "value": value} for value in values],
     }
+
+
+def _normalize_arxiv_candidate(paper: _ArxivWebSearchPaper) -> ArxivPaperCandidate:
+    abs_url = _canonical_arxiv_abs_url(paper.url)
+    arxiv_id = _arxiv_id_from_url(abs_url)
+    return ArxivPaperCandidate(
+        arxiv_id=arxiv_id,
+        title=paper.title.strip() or arxiv_id,
+        summary=paper.summary.strip(),
+        authors=[author.strip() for author in paper.authors if author.strip()],
+        abs_url=abs_url,
+        pdf_url=_canonical_arxiv_pdf_url(abs_url),
+    )
+
+
+def _canonical_arxiv_abs_url(url: str) -> str:
+    arxiv_id = _arxiv_id_from_url(url)
+    return f"https://arxiv.org/abs/{arxiv_id}"
+
+
+def _canonical_arxiv_pdf_url(url: str) -> str:
+    arxiv_id = _arxiv_id_from_url(url)
+    return f"https://arxiv.org/pdf/{arxiv_id}.pdf"
+
+
+def _arxiv_id_from_url(url: str) -> str:
+    parsed = urlparse(url.strip())
+    if parsed.scheme not in {"http", "https"}:
+        raise ValueError("Expected an HTTP arXiv URL.")
+    if parsed.netloc.lower() not in ARXIV_ALLOWED_HOSTS:
+        raise ValueError("Expected an arXiv URL.")
+
+    path = parsed.path.strip()
+    if path.startswith("/abs/"):
+        raw_identifier = path.removeprefix("/abs/")
+    elif path.startswith("/pdf/"):
+        raw_identifier = path.removeprefix("/pdf/")
+    else:
+        raise ValueError("Expected an arXiv abstract or PDF URL.")
+
+    normalized_identifier = raw_identifier.removesuffix(".pdf").strip("/")
+    if not normalized_identifier or not ARXIV_ID_PATTERN.match(normalized_identifier):
+        raise ValueError("Could not parse an arXiv identifier from the URL.")
+    return normalized_identifier
+
+
+def _display_filename_from_paper(paper: ArxivPaperCandidate) -> str:
+    normalized_title = re.sub(r"[^A-Za-z0-9._-]+", "_", paper.title).strip("._")
+    if not normalized_title:
+        normalized_title = paper.arxiv_id.replace("/", "_")
+    return f"{normalized_title[:120]}.pdf"
+
+
+def _filename_from_content_disposition(content_disposition: str | None) -> str | None:
+    if not content_disposition:
+        return None
+    filename_star_match = re.search(r"filename\\*=UTF-8''([^;]+)", content_disposition, flags=re.IGNORECASE)
+    if filename_star_match:
+        candidate = unquote(filename_star_match.group(1)).strip().strip('"')
+        return candidate or None
+    filename_match = re.search(r'filename="?([^";]+)"?', content_disposition, flags=re.IGNORECASE)
+    if filename_match:
+        candidate = filename_match.group(1).strip()
+        return candidate or None
+    return None

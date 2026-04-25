@@ -12,6 +12,7 @@ OpenAIAttributes: TypeAlias = dict[str, OpenAIAttributeValue]
 FileStatus: TypeAlias = Literal["processing", "ready", "failed"]
 SourceKind: TypeAlias = Literal["document", "audio", "image", "video", "other"]
 TagMatchMode: TypeAlias = Literal["all", "any"]
+FileListOrder: TypeAlias = Literal["newest", "filename"]
 
 
 def _read_text_from_search_result(search_result: VectorStoreSearchResponse) -> str:
@@ -153,6 +154,30 @@ class UploadSessionResult(BaseModel):
 
 class UploadFinalizeResult(BaseModel):
     file: FileSummary
+
+
+class ArxivPaperCandidate(BaseModel):
+    arxiv_id: str
+    title: str
+    summary: str = ""
+    authors: list[str] = Field(default_factory=list)
+    abs_url: str
+    pdf_url: str
+
+
+class ArxivSearchRequest(BaseModel):
+    query: str = Field(min_length=1)
+    max_results: int = Field(default=6, ge=1, le=10)
+
+
+class ArxivSearchResponse(BaseModel):
+    query: str
+    results: list[ArxivPaperCandidate] = Field(default_factory=list)
+
+
+class ArxivImportRequest(BaseModel):
+    paper: ArxivPaperCandidate
+    tag_ids: list[str] = Field(default_factory=list)
 
 
 class ImageDescriptionPayload(BaseModel):

@@ -6,7 +6,7 @@ from urllib.parse import urlparse
 
 import uvicorn
 
-from .logging import configure_logging
+from .logging import build_uvicorn_log_config, configure_logging, get_log_file_path
 from .settings import get_settings
 from .web_app import create_fastapi_app
 
@@ -21,12 +21,13 @@ def main() -> None:
 
     logger = logging.getLogger(__name__)
     logger.info(
-        "web_app_starting name=%s cwd=%s host=%s port=%s base_url=%s",
+        "web_app_starting name=%s cwd=%s host=%s port=%s base_url=%s log_file=%s",
         settings.app_name,
         Path.cwd(),
         host,
         port,
         settings.normalized_app_base_url,
+        get_log_file_path(),
     )
 
     uvicorn.run(
@@ -34,6 +35,7 @@ def main() -> None:
         host=host,
         port=port,
         log_level=settings.log_level.lower(),
+        log_config=build_uvicorn_log_config(settings.log_level),
     )
 
 

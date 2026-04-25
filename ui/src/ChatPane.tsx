@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ChatKit, type UseChatKitOptions, useChatKit } from "@openai/chatkit-react";
 
 import { authenticatedFetch, getChatKitConfig, setChatKitMetadataGetter } from "./api";
@@ -30,6 +30,8 @@ type ChatPaneProps = {
 export function ChatPane({ selectedFileIds, activeThreadId, onActiveThreadIdChange }: ChatPaneProps) {
   const initialThreadRef = useRef<string | null>(activeThreadId);
   const threadIdRef = useRef<string | null>(activeThreadId);
+  const [chatState, setChatState] = useState<"loading" | "ready" | "error">("loading");
+  const [chatError, setChatError] = useState<string | null>(null);
 
   useEffect(() => {
     setChatKitMetadataGetter(() => ({
@@ -42,6 +44,11 @@ export function ChatPane({ selectedFileIds, activeThreadId, onActiveThreadIdChan
   }, [selectedFileIds]);
 
   const chatKitConfig = getChatKitConfig();
+  useEffect(() => {
+    setChatState("loading");
+    setChatError(null);
+  }, [chatKitConfig.domainKey, chatKitConfig.url]);
+
   const options = useMemo<UseChatKitOptions>(() => {
     return {
       api: {
@@ -110,6 +117,14 @@ export function ChatPane({ selectedFileIds, activeThreadId, onActiveThreadIdChan
         threadIdRef.current = threadId ?? null;
         onActiveThreadIdChange(threadId ?? null);
       },
+      onReady: () => {
+        setChatState("ready");
+        setChatError(null);
+      },
+      onError: (error) => {
+        setChatState("error");
+        setChatError(extractChatKitError(error));
+      },
     };
   }, [chatKitConfig.domainKey, chatKitConfig.url, onActiveThreadIdChange]);
 
@@ -127,8 +142,36 @@ export function ChatPane({ selectedFileIds, activeThreadId, onActiveThreadIdChan
   }, [activeThreadId, chatKit]);
 
   return (
-    <div className="chatkit-shell">
-      <ChatKit control={chatKit.control} />
+    <div className="chatkit-pane-harness">
+      <div className="chatkit-shell">
+        <ChatKit control={chatKit.control} className="chatkit-element" />
+        {chatState !== "ready" ? (
+          <div className="chatkit-overlay">
+            <div className="chatkit-placeholder">
+              <p className="eyebrow">{chatState === "loading" ? "Connecting" : "Chat unavailable"}</p>
+              <h3>{chatState === "loading" ? "Loading the ChatKit workspace" : "ChatKit could not initialize"}</h3>
+              <p>
+                {chatState === "loading"
+                  ? "The assistant surface is wiring up to the authenticated ChatKit endpoint."
+                  : (chatError ?? "Check the browser console and the /api/chatkit backend response.")}
+              </p>
+            </div>
+          </div>
+        ) : null}
+      </div>
     </div>
   );
+}
+
+function extractChatKitError(error: unknown): string {
+  if (error instanceof Error && error.message) {
+    return error.message;
+  }
+  if (typeof error === "object" && error !== null && "message" in error) {
+    const message = error.message;
+    if (typeof message === "string" && message.trim()) {
+      return message;
+    }
+  }
+  return "The assistant UI did not finish initializing.";
 }

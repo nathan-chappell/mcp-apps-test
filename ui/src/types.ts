@@ -6,6 +6,8 @@ export type TagSummary = {
   file_count: number;
 };
 
+export type FileListSort = "newest" | "filename";
+
 export type AuthUser = {
   clerk_user_id: string;
   display_name: string;
@@ -70,4 +72,18 @@ export type UploadResponse = {
 
 export type DeleteFileResponse = {
   deleted_file_id: string;
+};
+
+export type ArxivPaperCandidate = {
+  arxiv_id: string;
+  title: string;
+  summary: string;
+  authors: string[];
+  abs_url: string;
+  pdf_url: string;
+};
+
+export type ArxivSearchResponse = {
+  query: string;
+  results: ArxivPaperCandidate[];
 };

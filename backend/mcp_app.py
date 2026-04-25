@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 from base64 import b64decode
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable
 from contextlib import asynccontextmanager
+import json
+import logging
 from pathlib import Path
 from tempfile import NamedTemporaryFile
-from typing import Annotated, Any, Literal
+from time import perf_counter
+from typing import Annotated, Any, Literal, cast
 
 from fastmcp import FastMCP, FastMCPApp
 from fastmcp.server.auth import MultiAuth
@@ -45,8 +48,48 @@ from pydantic import BaseModel, Field, create_model
 from .auth import ClerkTokenVerifier, get_current_clerk_access_token
 from .bootstrap import AppServices
 from .clerk import ClerkAuthService
-from .schemas import DeleteFileResult, FileDetail, FileListResponse, SearchBranchResponse, SearchHit, TagListResponse
+from .openai_tracing import clear_active_openai_tool_trace_refs, get_active_openai_tool_trace_refs
+from .schemas import (
+    ArxivPaperCandidate,
+    DeleteFileResult,
+    FileDetail,
+    FileListOrder,
+    FileListResponse,
+    SearchBranchResponse,
+    SearchHit,
+    TagListResponse,
+    UploadFinalizeResult,
+)
 from .settings import AppSettings
+
+# Prefab's runtime API accepts reactive values and style kwargs that the current type stubs
+# do not model, so we treat these UI constructors as dynamic at the integration boundary.
+Badge: Any = Badge
+Button: Any = Button
+CallTool: Any = CallTool
+Card: Any = Card
+CardContent: Any = CardContent
+CardDescription: Any = CardDescription
+CardHeader: Any = CardHeader
+CardTitle: Any = CardTitle
+Column: Any = Column
+DropZone: Any = DropZone
+Else: Any = Else
+ForEach: Any = ForEach
+Form: Any = Form
+H3: Any = H3
+If: Any = If
+Link: Any = Link
+Muted: Any = Muted
+Row: Any = Row
+Separator: Any = Separator
+SetState: Any = SetState
+ShowToast: Any = ShowToast
+Small: Any = Small
+Text: Any = Text
+create_dynamic_model: Any = create_model
+
+logger = logging.getLogger(__name__)
 
 
 def create_mcp_auth_provider(
@@ -99,6 +142,48 @@ def create_dev_mcp_server(
     )
 
 
+async def _run_logged_mcp_tool(
+    *,
+    tool_name: str,
+    clerk_user_id: str,
+    arguments: dict[str, object],
+    operation: Awaitable[Any],
+) -> Any:
+    if get_active_openai_tool_trace_refs() is not None:
+        try:
+            return await operation
+        finally:
+            clear_active_openai_tool_trace_refs()
+
+    started_at = perf_counter()
+    serialized_arguments = _serialize_for_log(arguments)
+    logger.info(
+        "mcp_tool_started tool=%s clerk_user_id=%s arguments=%s",
+        tool_name,
+        clerk_user_id,
+        serialized_arguments,
+    )
+    try:
+        result = await operation
+    except Exception:
+        logger.error(
+            "mcp_tool_failed tool=%s clerk_user_id=%s arguments=%s duration_ms=%.1f",
+            tool_name,
+            clerk_user_id,
+            serialized_arguments,
+            (perf_counter() - started_at) * 1000,
+        )
+        raise
+    logger.info(
+        "mcp_tool_completed tool=%s clerk_user_id=%s result=%s duration_ms=%.1f",
+        tool_name,
+        clerk_user_id,
+        _serialize_for_log(_summarize_mcp_tool_result(result)),
+        (perf_counter() - started_at) * 1000,
+    )
+    return result
+
+
 def _build_mcp_server(
     *,
     settings: AppSettings,
@@ -122,8 +207,9 @@ def _build_mcp_server(
             "semantic search UI over the current user's files. Use branch_search to iteratively "
             "expand semantic search through similar files, optionally scoped by one or more tags. "
             "Use list_files, search_files, search_file_branches, get_file_detail, read_file_text, "
-            "and list_tags to inspect the user's files. Only call delete_file after the user has "
-            "explicitly confirmed that the file should be removed."
+            "list_tags, search_arxiv_papers, and import_arxiv_paper to inspect and expand the "
+            "user's library. Only call delete_file after the user has explicitly confirmed that "
+            "the file should be removed."
         ),
         auth=auth,
         lifespan=server_lifespan,
@@ -139,7 +225,7 @@ def _register_mcp_routes(
 ) -> None:
     @server.tool(
         name="list_files",
-        description="List the user's uploaded files with optional text and tag filtering.",
+        description="List the user's uploaded files with optional metadata and tag filtering.",
         annotations=ToolAnnotations(
             readOnlyHint=True,
             destructiveHint=False,
@@ -151,16 +237,31 @@ def _register_mcp_routes(
         query: Annotated[str | None, Field(min_length=1)] = None,
         tag_ids: list[str] | None = None,
         tag_match_mode: Literal["all", "any"] = "all",
+        sort_order: FileListOrder = "newest",
         page: Annotated[int, Field(ge=1)] = 1,
         page_size: Annotated[int, Field(ge=1, le=100)] = 20,
     ) -> FileListResponse:
-        return await services.file_library.list_files(
-            clerk_user_id=_current_mcp_clerk_user_id(),
-            query=query,
-            tag_ids=tag_ids or [],
-            tag_match_mode=tag_match_mode,
-            page=page,
-            page_size=page_size,
+        clerk_user_id = _current_mcp_clerk_user_id()
+        return await _run_logged_mcp_tool(
+            tool_name="list_files",
+            clerk_user_id=clerk_user_id,
+            arguments={
+                "query": query,
+                "tag_ids": tag_ids or [],
+                "tag_match_mode": tag_match_mode,
+                "sort_order": sort_order,
+                "page": page,
+                "page_size": page_size,
+            },
+            operation=services.file_library.list_files(
+                clerk_user_id=clerk_user_id,
+                query=query,
+                tag_ids=tag_ids or [],
+                tag_match_mode=tag_match_mode,
+                sort_order=sort_order,
+                page=page,
+                page_size=page_size,
+            ),
         )
 
     @server.tool(
@@ -174,8 +275,14 @@ def _register_mcp_routes(
         ),
     )
     async def list_tags_tool() -> TagListResponse:
-        return await services.file_library.list_tags(
-            clerk_user_id=_current_mcp_clerk_user_id(),
+        clerk_user_id = _current_mcp_clerk_user_id()
+        return await _run_logged_mcp_tool(
+            tool_name="list_tags",
+            clerk_user_id=clerk_user_id,
+            arguments={},
+            operation=services.file_library.list_tags(
+                clerk_user_id=clerk_user_id,
+            ),
         )
 
     @server.tool(
@@ -197,12 +304,82 @@ def _register_mcp_routes(
         tag_match_mode: Literal["all", "any"] = "all",
         max_results: Annotated[int, Field(ge=1, le=20)] = 8,
     ) -> list[SearchHit]:
-        return await services.file_library.search_files(
-            clerk_user_id=_current_mcp_clerk_user_id(),
-            query=query,
-            tag_ids=tag_ids or [],
-            tag_match_mode=tag_match_mode,
-            max_results=max_results,
+        clerk_user_id = _current_mcp_clerk_user_id()
+        return await _run_logged_mcp_tool(
+            tool_name="search_files",
+            clerk_user_id=clerk_user_id,
+            arguments={
+                "query": query,
+                "tag_ids": tag_ids or [],
+                "tag_match_mode": tag_match_mode,
+                "max_results": max_results,
+            },
+            operation=services.file_library.search_files(
+                clerk_user_id=clerk_user_id,
+                query=query,
+                tag_ids=tag_ids or [],
+                tag_match_mode=tag_match_mode,
+                max_results=max_results,
+            ),
+        )
+
+    @server.tool(
+        name="search_arxiv_papers",
+        description=("Search arXiv with OpenAI web search and return importable paper results from arxiv.org."),
+        annotations=ToolAnnotations(
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=True,
+        ),
+    )
+    async def search_arxiv_papers_tool(
+        query: Annotated[str, Field(min_length=1)],
+        max_results: Annotated[int, Field(ge=1, le=10)] = 6,
+    ) -> list[ArxivPaperCandidate]:
+        clerk_user_id = _current_mcp_clerk_user_id()
+        return await _run_logged_mcp_tool(
+            tool_name="search_arxiv_papers",
+            clerk_user_id=clerk_user_id,
+            arguments={
+                "query": query,
+                "max_results": max_results,
+            },
+            operation=_search_arxiv_results(
+                services=services,
+                clerk_user_id=clerk_user_id,
+                query=query,
+                max_results=max_results,
+            ),
+        )
+
+    @server.tool(
+        name="import_arxiv_paper",
+        description="Download an arXiv paper PDF and ingest it into the current user's file library.",
+        annotations=ToolAnnotations(
+            readOnlyHint=False,
+            destructiveHint=False,
+            idempotentHint=False,
+            openWorldHint=True,
+        ),
+    )
+    async def import_arxiv_paper_tool(
+        paper: ArxivPaperCandidate,
+        tag_ids: list[str] | None = None,
+    ) -> UploadFinalizeResult:
+        clerk_user_id = _current_mcp_clerk_user_id()
+        return await _run_logged_mcp_tool(
+            tool_name="import_arxiv_paper",
+            clerk_user_id=clerk_user_id,
+            arguments={
+                "paper": paper.model_dump(mode="json"),
+                "tag_ids": tag_ids or [],
+            },
+            operation=services.file_library.import_arxiv_paper(
+                clerk_user_id=clerk_user_id,
+                paper=paper,
+                tag_ids=tag_ids or [],
+            ),
         )
 
     @server.tool(
@@ -225,13 +402,25 @@ def _register_mcp_routes(
         descend: Annotated[int, Field(ge=0, le=4)] = 2,
         max_width: Annotated[int, Field(ge=1, le=8)] = 3,
     ) -> SearchBranchResponse:
-        return await services.file_library.search_file_branches(
-            clerk_user_id=_current_mcp_clerk_user_id(),
-            query=query,
-            tag_ids=tag_ids or [],
-            tag_match_mode=tag_match_mode,
-            descend=descend,
-            max_width=max_width,
+        clerk_user_id = _current_mcp_clerk_user_id()
+        return await _run_logged_mcp_tool(
+            tool_name="search_file_branches",
+            clerk_user_id=clerk_user_id,
+            arguments={
+                "query": query,
+                "tag_ids": tag_ids or [],
+                "tag_match_mode": tag_match_mode,
+                "descend": descend,
+                "max_width": max_width,
+            },
+            operation=services.file_library.search_file_branches(
+                clerk_user_id=clerk_user_id,
+                query=query,
+                tag_ids=tag_ids or [],
+                tag_match_mode=tag_match_mode,
+                descend=descend,
+                max_width=max_width,
+            ),
         )
 
     @server.tool(
@@ -247,9 +436,15 @@ def _register_mcp_routes(
     async def get_file_detail_tool(
         file_id: Annotated[str, Field(min_length=1)],
     ) -> FileDetail:
-        return await services.file_library.get_file_detail(
-            clerk_user_id=_current_mcp_clerk_user_id(),
-            file_id=file_id,
+        clerk_user_id = _current_mcp_clerk_user_id()
+        return await _run_logged_mcp_tool(
+            tool_name="get_file_detail",
+            clerk_user_id=clerk_user_id,
+            arguments={"file_id": file_id},
+            operation=services.file_library.get_file_detail(
+                clerk_user_id=clerk_user_id,
+                file_id=file_id,
+            ),
         )
 
     @server.tool(
@@ -269,10 +464,19 @@ def _register_mcp_routes(
         file_id: Annotated[str, Field(min_length=1)],
         max_chars: Annotated[int, Field(ge=250, le=20_000)] = 12_000,
     ) -> str:
-        return await services.file_library.read_file_text(
-            clerk_user_id=_current_mcp_clerk_user_id(),
-            file_id=file_id,
-            max_chars=max_chars,
+        clerk_user_id = _current_mcp_clerk_user_id()
+        return await _run_logged_mcp_tool(
+            tool_name="read_file_text",
+            clerk_user_id=clerk_user_id,
+            arguments={
+                "file_id": file_id,
+                "max_chars": max_chars,
+            },
+            operation=services.file_library.read_file_text(
+                clerk_user_id=clerk_user_id,
+                file_id=file_id,
+                max_chars=max_chars,
+            ),
         )
 
     @server.tool(
@@ -292,21 +496,115 @@ def _register_mcp_routes(
         file_id: Annotated[str, Field(min_length=1)],
         confirm: bool = False,
     ) -> DeleteFileResult | dict[str, object]:
+        clerk_user_id = _current_mcp_clerk_user_id()
         if not confirm:
-            return {
-                "confirmation_required": True,
-                "file_id": file_id,
-                "message": (
-                    "Deletion requires explicit confirmation. Ask the user to confirm, then call "
-                    "delete_file again with confirm=true."
-                ),
-            }
-        return await services.file_library.delete_file(
-            clerk_user_id=_current_mcp_clerk_user_id(),
-            file_id=file_id,
+
+            async def confirmation_response() -> dict[str, object]:
+                return {
+                    "confirmation_required": True,
+                    "file_id": file_id,
+                    "message": (
+                        "Deletion requires explicit confirmation. Ask the user to confirm, then call "
+                        "delete_file again with confirm=true."
+                    ),
+                }
+
+            return await _run_logged_mcp_tool(
+                tool_name="delete_file",
+                clerk_user_id=clerk_user_id,
+                arguments={"file_id": file_id, "confirm": confirm},
+                operation=confirmation_response(),
+            )
+        return await _run_logged_mcp_tool(
+            tool_name="delete_file",
+            clerk_user_id=clerk_user_id,
+            arguments={"file_id": file_id, "confirm": confirm},
+            operation=services.file_library.delete_file(
+                clerk_user_id=clerk_user_id,
+                file_id=file_id,
+            ),
         )
 
     _register_file_app(server=server, services=services)
+
+
+def _serialize_for_log(value: object) -> str:
+    return json.dumps(
+        value,
+        sort_keys=True,
+        default=str,
+        separators=(",", ":"),
+    )
+
+
+def _summarize_mcp_tool_result(result: object) -> object:
+    if isinstance(result, FileListResponse):
+        return {
+            "returned": len(result.files),
+            "total_count": result.total_count,
+            "page": result.page,
+            "page_size": result.page_size,
+            "has_more": result.has_more,
+        }
+    if isinstance(result, TagListResponse):
+        return {
+            "returned": len(result.tags),
+        }
+    if isinstance(result, SearchBranchResponse):
+        return {
+            "levels": len(result.levels),
+            "returned": sum(len(level.hits) for level in result.levels),
+        }
+    if isinstance(result, UploadFinalizeResult):
+        return {
+            "file_id": result.file.id,
+            "display_title": result.file.display_title,
+            "status": result.file.status,
+        }
+    if isinstance(result, FileDetail):
+        return {
+            "file_id": result.id,
+            "derived_artifacts": len(result.derived_artifacts),
+            "tags": len(result.tags),
+        }
+    if isinstance(result, DeleteFileResult):
+        return result.model_dump(mode="json")
+    if isinstance(result, str):
+        return {
+            "chars": len(result),
+        }
+    if isinstance(result, list):
+        if all(isinstance(item, SearchHit) for item in result):
+            return {
+                "returned": len(result),
+                "file_ids": [item.file_id for item in result[:3]],
+            }
+        if all(isinstance(item, ArxivPaperCandidate) for item in result):
+            return {
+                "returned": len(result),
+                "arxiv_ids": [item.arxiv_id for item in result[:3]],
+            }
+        return {
+            "returned": len(result),
+        }
+    if isinstance(result, BaseModel):
+        return result.model_dump(mode="json")
+    return result
+
+
+async def _search_arxiv_results(
+    *,
+    services: AppServices,
+    clerk_user_id: str,
+    query: str,
+    max_results: int,
+) -> list[ArxivPaperCandidate]:
+    response = await services.file_library.search_arxiv_papers(
+        clerk_user_id=clerk_user_id,
+        query=query,
+        max_results=max_results,
+    )
+    return response.results
 
 
 def _register_file_app(
@@ -333,6 +631,7 @@ def _register_file_app(
                     query=None,
                     tag_ids=[],
                     tag_match_mode="all",
+                    sort_order="newest",
                     page=1,
                     page_size=50,
                 )
@@ -977,8 +1276,8 @@ def _form_match_mode(
     default: Literal["all", "any"],
 ) -> Literal["all", "any"]:
     value = data.get("tag_match_mode")
-    if value in {"all", "any"}:
-        return value
+    if isinstance(value, str) and value in {"all", "any"}:
+        return cast(Literal["all", "any"], value)
     return default
 
 
@@ -1030,7 +1329,7 @@ def _build_search_form_model(
             Field(default=tag_id in selected_tag_id_set, title=str(tag["name"])),
         )
 
-    return create_model(name, **model_fields)
+    return cast(type[BaseModel], create_dynamic_model(name, **model_fields))
 
 
 def _build_search_form_arguments(

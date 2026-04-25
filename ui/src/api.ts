@@ -1,8 +1,11 @@
 import type {
+  ArxivPaperCandidate,
+  ArxivSearchResponse,
   AuthUser,
   DeleteFileResponse,
   FileDetail,
   FileListResponse,
+  FileListSort,
   TagListResponse,
   UploadResponse,
   UploadSessionResponse,
@@ -56,6 +59,7 @@ export async function authenticatedFetch(input: RequestInfo | URL, init?: Reques
 export async function listFiles(params: {
   query?: string;
   tagIds?: string[];
+  sort?: FileListSort;
   page?: number;
   pageSize?: number;
 }): Promise<FileListResponse> {
@@ -67,6 +71,9 @@ export async function listFiles(params: {
     for (const tagId of params.tagIds) {
       searchParams.append("tag_ids", tagId);
     }
+  }
+  if (params.sort) {
+    searchParams.set("sort", params.sort);
   }
   if (params.page) {
     searchParams.set("page", String(params.page));
@@ -115,6 +122,26 @@ export async function uploadFile(file: File, tagIds: string[]): Promise<UploadRe
     throw await buildApiError(response);
   }
   return (await response.json()) as UploadResponse;
+}
+
+export async function searchArxiv(query: string, maxResults = 6): Promise<ArxivSearchResponse> {
+  return apiRequest<ArxivSearchResponse>("/imports/arxiv/search", {
+    method: "POST",
+    body: JSON.stringify({
+      query,
+      max_results: maxResults,
+    }),
+  });
+}
+
+export async function importArxivPaper(paper: ArxivPaperCandidate): Promise<UploadResponse> {
+  return apiRequest<UploadResponse>("/imports/arxiv", {
+    method: "POST",
+    body: JSON.stringify({
+      paper,
+      tag_ids: [],
+    }),
+  });
 }
 
 async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
